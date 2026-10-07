@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet · Live meeting</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/live.css"></head>
+<body><aside class="sidebar"><a class="brand" href="/">≋ voxmeet <span class="lab">LAB</span></a><a class="nav" href="/">← Recordings</a><span class="nav active">◉ Live meeting</span></aside>
+<main><header>Workspace / Live meeting <span class="tag">English · Local CPU</span></header>
+<section><p class="eyebrow">LISTEN AS IT HAPPENS</p><h1>Your meeting, in words.</h1>
+<p>Record your microphone and meeting audio separately. Live text is a draft and may change.</p>
+<div class="summary-panel"><h2>Audio sources</h2>
+<p>Use Chrome or Edge. For Meet / Zoom in a browser, share its tab and enable “Share tab audio”. For desktop meetings, choose a screen with system audio if offered. Headphones help prevent duplicate audio.</p>
+<label><input id="mic" type="checkbox" checked> Room microphone</label>
+<label><input id="system" type="checkbox" checked> Meeting tab / system audio</label>
+<p>Source labels are not speaker identities. This first live version does not yet identify individual speakers.</p>
+<button id="start" class="button" disabled>Start meeting</button> <button id="stop" class="button secondary" disabled>Stop & save</button>
+<p id="state" role="status">Checking streaming model…</p><p id="error" class="error" hidden></p>
+<div class="live-meters"><label>Microphone <meter id="mic-level" min="0" max="1" value="0"></meter></label><label>Meeting audio <meter id="system-level" min="0" max="1" value="0"></meter></label></div>
+<p id="timing">The 1–2 second target is not yet validated on your microphone.</p><a id="saved" class="button" hidden>Open saved meeting →</a>
+</div>
+<h2>Live transcript <span class="tag">Draft</span></h2><p>Text updates while you speak. A pause settles the current turn; final speaker review happens after the meeting.</p>
+<div id="turns" aria-live="polite"></div>
+<p class="privacy">Audio is stored on this computer. Maximum 30 minutes. Tell participants before recording. Closing this page stops capture; only audio already received by the server can be saved.</p>
+</section></main><script src="/live.js" type="module"></script></body></html>

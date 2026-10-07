@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet — Audio to transcript</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="VoxMeet home"><span class="logo" aria-hidden="true">≋</span>voxmeet<span class="lab">LAB</span></a>
+  <div class="sidebar-caption">YOUR WORKSPACE</div>
+  <button id="home" class="nav active"><span aria-hidden="true">▤</span> Recordings <span id="count" class="count">0</span></button>
+  <a class="nav" href="/live.html">◉ Live meeting</a>
+  <button id="setup" class="nav"><span aria-hidden="true">⚙</span> Setup</button>
+  <div class="sidebar-bottom"><span class="dot"></span> English · First milestone<p>One recording.<br>Every voice in context.</p><small>AI Speech-to-Text project</small></div>
+</aside>
+<main>
+  <header><span>Workspace <span class="slash">/</span> <span id="breadcrumb">Recordings</span></span><span class="step-badge">STEP 01 <span>Audio → Transcript</span></span></header>
+  <section id="library">
+    <div class="intro"><p class="eyebrow">START WITH THE WORDS</p><h1>A conversation, made clear.</h1><p class="subtitle">Upload an English recording. See what was said, and who said it.</p></div>
+    <div class="pipeline" aria-label="Processing steps"><span><b>01</b> Upload audio</span><i aria-hidden="true">→</i><span><b>02</b> Transcribe & identify speakers</span><i aria-hidden="true">→</i><span><b>03</b> Read & listen</span></div>
+    <div class="upload-zone" id="drop-zone">
+      <div class="upload-icon" aria-hidden="true">↥</div><div><h2>Bring your recording</h2><p>Drop a file here, or choose one from your computer.</p><small>WAV, MP3, M4A, MP4, FLAC, OGG, WebM · 100 MB · up to 30 min</small></div>
+      <button id="choose-file" class="button">Choose audio <span aria-hidden="true">↗</span></button>
+      <input id="file" type="file" accept=".wav,.mp3,.m4a,.mp4,.flac,.ogg,.webm" hidden>
+    </div>
+    <p><button id="import-colab" class="button secondary">Import Colab transcript (.json)</button><input id="colab-file" type="file" accept=".json" hidden></p>
+    <div id="upload-status" role="status" class="message" hidden></div>
+    <div class="notice" id="readiness" hidden><span aria-hidden="true">ⓘ</span><p id="readiness-text"></p><button class="text-button" id="setup-inline">View setup →</button></div>
+    <div class="section-head"><h2>Your recordings <span id="total">0</span></h2><input type="search" id="search" placeholder="Search recordings…" aria-label="Search recordings"></div>
+    <div id="recordings" aria-live="polite"></div>
+    <p class="privacy">Uploads are stored on this computer. Audio is sent externally only when you choose API processing.</p>
+  </section>
+  <section id="detail" hidden>
+    <button id="back" class="back">← All recordings</button>
+    <div class="detail-title"><div><p class="eyebrow">ENGLISH RECORDING</p><h1 id="recording-title"></h1><p id="recording-meta" class="subtitle"></p></div><a id="export" class="button secondary" hidden>↓ Export .txt</a></div>
+    <div class="player" id="player" hidden><div class="player-icon" aria-hidden="true">≋</div><div><strong>Original recording</strong><p>Select a transcript timestamp to listen from that moment.</p></div><audio id="audio" controls preload="metadata"></audio></div>
+    <div class="processing-controls"><div><label for="provider">Processing mode</label><select id="provider"><option value="local">Local CPU · Legacy speaker model</option><option value="deepgram">API · Deepgram</option></select></div><div class="mode-description"><p id="provider-note"></p><button id="setup-detail" class="text-button">Connection setup ↗</button></div><button id="transcribe" class="button">Create transcript →</button></div>
+    <section class="summary-panel">
+      <h2>GPU transcript · Community-1</h2>
+      <p>Free Colab: run one notebook cell for each recording. Audio transfer and transcript import happen automatically. Keep this demo open. Audio passes through Cloudflare to Google Colab.</p>
+      <p><button id="gpu-connect" class="button">Connect this recording to Colab</button> <a id="gpu-connected-notebook" class="button secondary" hidden>Open with Colab · download notebook</a></p>
+      <p id="gpu-connection-status" role="status"></p>
+      <details><summary>Manual transfer (fallback)</summary>
+      <p>Use the evaluated speaker model with Whisper small.en on Colab. Upload the downloaded ZIP to Colab, then bring the result back here. Audio is sent to Google only when you upload it there.</p>
+      <p><a id="gpu-package" class="button secondary">1. Download audio package</a> <a class="text-button" href="/api/gpu-notebook">2. Download Colab notebook</a> <button id="gpu-import" class="button">3. Apply GPU result</button><input id="gpu-file" type="file" accept=".json" hidden></p>
+      <p>Open the notebook in Colab using File → Upload notebook. Enable a T4 GPU and the HF_TOKEN secret. Applying a result replaces this transcript, keeps a backup and clears the old summary.</p>
+      </details><p id="gpu-provenance"></p>
+    </section><div class="speaker-options"><label for="speaker-count">Number of speakers</label><select id="speaker-count"><option value="">Detect automatically</option><option value="1">1 speaker</option><option value="2">2 speakers</option><option value="3">3 speakers</option><option value="4">4 speakers</option><option value="5">5 speakers</option><option value="6">6 speakers</option></select><span>Optional, if you know the number. Local mode only.</span></div>
+    <div class="processing-status"><p class="state-line" id="status" role="status"></p><button id="cancel" class="text-button" hidden>Cancel processing</button></div><progress id="progress" max="100" hidden aria-label="Current processing stage"></progress><div id="error" class="error" hidden role="alert"></div><div id="warning" class="notice" hidden></div>
+    <div class="transcript-heading"><div><h2>The conversation</h2><p>Original speech, grouped by speaker. Speaker numbers apply to this recording.</p></div><span id="stats" class="stats"></span></div>
+    <section class="summary-panel">
+      <h2>Meeting summary <span class="tag">AI draft</span></h2>
+      <p>Discussion highlights only. Check each point against its source. No automatic assignments or deadlines.</p>
+      <div class="processing-controls"><select id="summary-provider" aria-label="Summary processing mode"><option value="ollama">Local · Ollama</option><option value="api">API · Configured provider</option></select><button id="summarize" class="button">Summarize meeting</button><a id="summary-export" class="text-button" hidden>Export summary</a></div>
+      <p id="summary-note"></p><p id="summary-status" role="status"></p><div id="summary-result"></div>
+    </section>
+    <section class="summary-panel chat-panel" id="qa-panel">
+      <div class="chat-heading"><div><h2>Chat about this recording</h2><p>Ask a question or follow up on the conversation. Answers stay grounded in the transcript.</p></div><span class="tag">AI draft</span></div>
+      <div id="qa-results" class="chat-messages" role="log" aria-live="polite" aria-label="Conversation"></div>
+      <p id="qa-status" role="status"></p>
+      <button id="qa-retry" class="text-button" type="button" hidden>Retry last message</button>
+      <form id="qa-form" class="chat-composer"><label class="chat-label" for="qa-question">Message</label>
+      <textarea id="qa-question" rows="2" maxlength="1000" required placeholder="Ask about the recording… or follow up on the last answer"></textarea>
+      <div class="chat-actions"><select id="qa-provider" aria-label="Chat provider"><option value="ollama">Local · Ollama</option><option value="api">API · Configured provider</option></select><small>Enter to send · Shift+Enter for a new line</small><button id="qa-ask" class="button" type="submit">Send ↑</button></div></form>
+      <p id="qa-note" class="chat-note"></p>
+    </section><div id="speaker-legend" class="speaker-legend"></div><div id="transcript"></div>
+  </section>
+</main>
+<dialog id="setup-dialog"><div class="dialog-heading"><div><p class="eyebrow">GET READY TO TRANSCRIBE</p><h2>Processing setup</h2></div><button id="close-setup" class="close" aria-label="Close setup">×</button></div>
+  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><div id="connections"></div>
+  <details open><summary>Local · No account required</summary><p>Run <code>setup.ps1 -LocalModels</code> once to install the libraries and download English Whisper and speaker recognition models. After setup, recordings are processed on this computer without sending audio elsewhere.</p><p>No API key or Hugging Face token is needed. CPU processing can take longer than the recording itself.</p></details>
+  <details><summary>API · Deepgram</summary><p>Set <code>DEEPGRAM_API_KEY</code> in <code>meeting-ai/.env</code> and restart. This may incur provider usage charges. The key stays on the backend.</p></details>
+  <details><summary>Summary · Local or API</summary><p>For local drafts, start Ollama and run <code>ollama pull qwen2.5:3b</code>. Set <code>OLLAMA_MODEL=qwen2.5:3b</code> in .env. CPU generation can take several minutes. API mode uses <code>LLM_API_URL</code>, <code>LLM_API_KEY</code>, and <code>LLM_API_MODEL</code>; selecting it sends transcript text to that provider.</p><p>Import <code>transcript_with_speakers.json</code> from Colab to use the evaluated Whisper small.en + Community-1 results. Import does not attach the original audio or change the local speech models.</p></details>
+  <p class="setup-note">Local status checks installed libraries and downloaded files. API status checks only whether a key is configured. Full instructions are in <code>meeting-ai/README.md</code>.</p><button id="refresh-setup" class="button secondary">Refresh connection status</button>
+</dialog>
+<div id="toast" class="toast" role="alert" hidden></div>
+<dialog id="edit-dialog"><h2>Edit transcript turn</h2><form id="edit-form"><label>Speaker<select id="edit-speaker"></select></label><label>Transcript<textarea id="edit-text" rows="6" maxlength="12000" required></textarea></label><p>Original text and timestamps are preserved. Saving clears the previous summary. Word timings still refer to the original recognition.</p><button class="button" id="save-edit" type="submit">Save changes</button><button class="button secondary" type="button" id="cancel-edit">Cancel</button></form></dialog>
+<dialog id="split-dialog"><h2>Split speaker turn</h2>
+<form id="split-form"><label>Second part starts with<select id="split-word"></select></label>
+<label>Split time (seconds)<input id="split-time" type="number" step="0.01" required></label>
+<button id="split-listen" type="button" class="text-button">Listen near boundary</button>
+<p id="split-timing-note"></p>
+<label>First part speaker<select id="split-left"></select></label><p id="split-left-text"></p>
+<label>Second part speaker<select id="split-right"></select></label><p id="split-right-text"></p>
+<p>Confirm the change of voice by listening. The original turn is backed up and the old summary is cleared. You can split either part again.</p>
+<button id="split-save" class="button" type="submit">Save split</button>
+<button id="split-cancel" class="button secondary" type="button">Cancel</button></form></dialog>
+<script src="/app.js" type="module"></script>
+</body></html>
