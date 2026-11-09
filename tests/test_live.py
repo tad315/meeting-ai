@@ -1,4 +1,5 @@
 import tempfile, unittest, wave, json, time
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
@@ -44,7 +45,7 @@ class LiveTests(unittest.TestCase):
                 ws.send_json({'sources':[True,False]});self.assertEqual(ws.receive_json()['type'],'loading')
                 mid=ws.receive_json()['id']
                 ws.send_bytes(b'\0'*12800);self.assertEqual(ws.receive_json()['frames'],3200)
-                self.assertEqual(self.client.post(f'/api/recordings/{mid}/questions',json={'question':'What?'}).status_code,409)
+                self.assertEqual(self.client.post(f'/api/recordings/{mid}/questions',json={'question':'What?'}).status_code,400)
                 ws.send_json({'type':'stop'});self.assertEqual(ws.receive_json()['type'],'saved')
         item=store.get(mid);self.assertEqual(item['status'],'ready');self.assertEqual(item['duration'],.2)
         self.assertEqual(len(item['segments']),1)
@@ -61,3 +62,44 @@ class LiveTests(unittest.TestCase):
                 time.sleep(.01)
             self.assertEqual(store.get(mid)['status'],'ready')
             self.assertIn('interrupted',store.get(mid)['warning'])
+
+    def test_resume_appends_audio_and_preserves_transcript_and_chat(self):
+        with patch.object(live,'create_recognizer',return_value=FakeRecognizer()):
+            def capture(resume=None):
+                with self.client.websocket_connect('/api/live/stream',headers={'origin':'http://testserver'}) as ws:
+                    ws.send_json({'sources':[True,False],'resume_id':resume});ws.receive_json();ready=ws.receive_json()
+                    ws.send_bytes(np.full((3200,2),100,dtype='<i2').tobytes());ws.receive_json()
+                    ws.send_json({'type':'stop'});ws.receive_json();return ready['id']
+            mid=capture();original=store.get(mid)['segments'][0]
+            store.patch(mid,qa=[{'question':'old question'}],summary={'text':'old summary'})
+            self.assertEqual(capture(mid),mid)
+        item=store.get(mid);self.assertEqual(item['segments'][0],original)
+        self.assertEqual(item['duration'],.4);self.assertEqual(item['qa'][0]['question'],'old question')
+        with wave.open(item['audio']) as f:self.assertEqual(f.getnframes(),6400)
+
+    def test_live_assistant_finishes_while_audio_keeps_arriving(self):
+        class EndpointRecognizer(FakeRecognizer):
+            def is_endpoint(self,s):return True
+        async def qa(snapshot,question,provider):
+            await asyncio.sleep(.05)
+            return {'answerable':True,'points':[{'text':'test speech','evidence':[{'id':snapshot['segments'][0]['id'],'quote':'test speech'}]}],'scope':'full_transcript'}
+        async def summary(snapshot,provider):
+            await asyncio.sleep(.05)
+            return {'revision':snapshot['revision'],'sections':[],'label':'draft'}
+        with patch.object(live,'create_recognizer',return_value=EndpointRecognizer()),patch.object(step_one,'answer_meeting_question',qa),patch.object(step_one,'draft_summary',summary):
+            with self.client.websocket_connect('/api/live/stream',headers={'origin':'http://testserver'}) as ws:
+                ws.send_json({'sources':[True,False]});ws.receive_json();mid=ws.receive_json()['id']
+                ws.send_bytes(b'\0'*12800);ws.receive_json()
+                self.assertEqual(self.client.post(f'/api/recordings/{mid}/questions',json={'question':'What?'}).status_code,202)
+                for _ in range(20):
+                    ws.send_bytes(b'\0'*12800);ws.receive_json();time.sleep(.01)
+                    if store.get(mid).get('qa_status')=='ready':break
+                self.assertEqual(store.get(mid)['qa_status'],'ready')
+                self.assertEqual(self.client.post(f'/api/recordings/{mid}/summary',json={'provider':'ollama'}).status_code,202)
+                for _ in range(20):
+                    ws.send_bytes(b'\0'*12800);ws.receive_json();time.sleep(.01)
+                    if store.get(mid).get('summary_status')=='ready':break
+                self.assertEqual(store.get(mid)['summary_status'],'ready')
+                ws.send_json({'type':'stop'});ws.receive_json()
+        item=store.get(mid);self.assertTrue(item['qa']);self.assertTrue(item['summary_history'])
+        self.assertGreater(len(item['segments']),2);self.assertLess(item['qa'][0]['through_seconds'],item['duration'])

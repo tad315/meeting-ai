@@ -54,13 +54,15 @@ class GPUExchangeTests(__import__('unittest').TestCase):
             self.assertEqual(r.status_code,400,r.text)
         self.assertEqual(store.get(item['id'])['revision'],1)
 
-    def test_summary_prompt_keeps_speaker_context(self):
+    def test_summary_does_not_turn_source_labels_into_people(self):
         import asyncio
         from unittest.mock import patch
         from app.demo_features import draft_summary
         item=self.imported()
-        async def fake(messages,provider):
-            self.assertIn('Speaker label 0:', messages[1]['content'])
-            return '{"bullets":[{"text":"Design discussed","ids":["U0001"]}]}'
+        async def fake(messages,provider,**kwargs):
+            self.assertNotIn('Speaker label', messages[1]['content'])
+            self.assertEqual(kwargs['schema']['properties']['bullets']['items']['properties']['ids']['items']['enum'], [str(i+1) for i in range(len(item['segments']))])
+            return '{"bullets":[{"category":"discussion","text":"Design discussed","ids":["U0001"]}]}'
         with patch('app.demo_features.chat',fake):
             asyncio.run(draft_summary(item,'ollama'))
+

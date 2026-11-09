@@ -1,1 +1,24 @@
 .live-meters{display:flex;gap:32px;margin:16px 0}.live-meters label{display:flex;gap:12px;align-items:center}meter{width:140px}.summary-panel>label{display:inline-block;margin:8px 24px 12px 0}.live-turn{padding:16px;border-bottom:1px solid #e0e5da}.live-turn small{color:#73816b}.live-turn p{margin:8px 0}.live-turn.pending{background:#f0f4ed;border-left:3px solid #87a76d}.sidebar a.nav{text-decoration:none}#turns{min-height:120px}#error[hidden]{display:none}
+
+#recordings-frame{width:100%;height:80vh;border:1px solid #dce3d7;border-radius:12px;margin-top:16px}#live-chat{max-height:420px;overflow:auto}#live-chat article{padding:12px 0;border-bottom:1px solid #dce3d7}#live-assistant textarea{width:100%;margin:8px 0}#live-panel[hidden],#library-panel[hidden]{display:none}#turns{max-height:55vh;overflow:auto}
+
+#recordings-frame{width:100%;height:80vh;border:1px solid #dce3d7;border-radius:12px;margin-top:16px}#live-chat{max-height:420px;overflow:auto}#live-chat article{padding:12px 0;border-bottom:1px solid #dce3d7}#live-assistant textarea{width:100%;margin:8px 0}#live-panel[hidden],#library-panel[hidden]{display:none}#turns{max-height:55vh;overflow:auto}
+
+/* One navigation shell and one scrolling content pane in library mode. */
+body.library-view{height:100dvh;overflow:hidden}
+body.library-view>main{height:100dvh;display:flex;flex-direction:column;min-width:0}
+body.library-view>main>header{flex-shrink:0}
+#library-panel{flex:1;min-height:0;padding:16px 0 0;display:flex;flex-wrap:wrap;align-content:flex-start;gap:12px}
+#return-live{margin-left:28px}#library-setup{margin-left:auto;margin-right:28px}
+#capture-banner{flex-basis:100%;margin:0;padding:0 28px;font-size:12px}
+#recordings-frame{flex:1 1 100%;height:0;min-height:0;align-self:stretch;width:100%;border:0;border-radius:0;margin:0}
+#library-panel{flex-direction:column;flex-wrap:nowrap;display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto minmax(0,1fr)}
+#return-live{justify-self:start}#capture-banner,#recordings-frame{grid-column:1/-1}#recordings-frame{height:100%}
+@media(max-width:700px){body.library-view>main{height:calc(100dvh - 70px)}.sidebar .nav.active{display:flex}.sidebar .nav{font-size:11px;padding:8px;margin:0}.sidebar{gap:8px}#return-live{margin-left:20px}#library-setup{margin-right:20px}}
+
+#library-panel{width:100%;max-width:none;margin:0}
+
+
+/* Recordings starts directly below the workspace header. */
+#library-panel{padding:0;gap:0;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+#recordings-frame{grid-column:1;grid-row:1}

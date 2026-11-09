@@ -83,7 +83,10 @@ class APITests(unittest.TestCase):
         self.assertNotIn('/api/meetings/{mid}/summary', routes)
         self.assertNotIn('/api/meetings/{mid}/chat', routes)
         self.assertEqual(self.client.get('/api/health').json()['milestone'], 1)
-        self.assertIn('Bring your recording', self.client.get('/').text)
+        self.assertIn('id="overview-count"', self.client.get('/').text)
+        recordings = self.client.get('/recordings')
+        self.assertEqual(recordings.status_code, 200)
+        self.assertIn('id="translation-panel"', recordings.text)
 
     @unittest.skipUnless(ffmpeg_path(), 'FFmpeg is needed for real decoding tests')
     def test_upload_playback_and_api_result_persistence(self):

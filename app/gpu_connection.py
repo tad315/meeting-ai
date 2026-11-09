@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+import urllib.request
 from . import store
 from .gpu_exchange import make_package
 
@@ -26,34 +27,88 @@ def shutdown():
     if log_stream: log_stream.close(); log_stream = None
 
 
+def reusable_link():
+    try:
+        state = json.loads((store.DATA/'gpu-bridge/tunnel-state.json').read_text())
+        url, instance = state['url'], state['instance']
+        if not re.fullmatch(r'https://[a-z0-9-]+\.trycloudflare\.com', url) or not instance:
+            return None
+        for endpoint in ('http://127.0.0.1:8010', url):
+            with urllib.request.urlopen(endpoint + '/bridge-health', timeout=8) as response:
+                if json.load(response).get('instance') != instance:
+                    return None
+        return url
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def remember_link(url, instance):
+    target = store.DATA/'gpu-bridge/tunnel-state.json'
+    partial = target.with_suffix('.part')
+    partial.write_text(json.dumps(dict(url=url, instance=instance)))
+    partial.replace(target)
+    return url
+
+
+def local_relay_instance():
+    """Reuse only our existing relay, never an unrelated service on port 8010."""
+    try:
+        state = json.loads((store.DATA/'gpu-bridge/tunnel-state.json').read_text())
+        instance = state['instance']
+        if not isinstance(instance, str) or not re.fullmatch('[0-9a-f]{32}', instance):
+            return None
+        with urllib.request.urlopen('http://127.0.0.1:8010/bridge-health', timeout=3) as response:
+            if json.load(response).get('instance') == instance:
+                return instance
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    return None
+
+
+def public_link_ready(url, instance):
+    try:
+        with urllib.request.urlopen(url+'/bridge-health', timeout=3) as response:
+            return json.load(response).get('instance') == instance
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def connect():
     global log_stream
+    previous = reusable_link()
+    if previous:
+        return previous
     executable = store.ROOT/'data/gpu-tools/cloudflared.exe'
     if not executable.is_file():
         raise ValueError('Run setup-gpu-link.ps1 once, then try again.')
     folder = store.DATA/'gpu-bridge'
     folder.mkdir(parents=True,exist_ok=True)
     log = folder/'tunnel.log'
-    if len(processes)==2 and all(p.poll() is None for p in processes):
-        match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', log.read_text(errors='replace'))
-        if match: return match.group(0)
+    # A running cloudflared process is NOT proof that its public URL still exists.
+    # Retire owned stale processes instead of returning the first URL in an old log.
     shutdown()
-    env = os.environ.copy()
-    env['VOXMEET_BRIDGE_DATA'] = str(folder)
-    flags = getattr(subprocess,'CREATE_NO_WINDOW',0)
-    relay_log = (folder/'relay.log').open('ab')
-    try:
-        relay = subprocess.Popen([sys.executable,'-m','uvicorn','app.gpu_bridge:bridge',
-                                  '--host','127.0.0.1','--port','8010','--no-access-log'],
-                                 cwd=store.ROOT, env=env, stdout=relay_log,stderr=relay_log,
-                                 creationflags=flags)
-    finally: relay_log.close()
-    processes.append(relay)
-    # A busy port must not accidentally publish another local application.
-    time.sleep(2)
-    if relay.poll() is not None:
-        shutdown()
-        raise ValueError('GPU transfer port 8010 is unavailable. See data/gpu-bridge/relay.log.')
+    instance = local_relay_instance()
+    flags = getattr(subprocess,'CREATE_NO_WINDOW',0) | getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)
+    if not instance:
+        env = os.environ.copy()
+        env['VOXMEET_BRIDGE_DATA'] = str(folder)
+        instance = uuid.uuid4().hex
+        env['VOXMEET_BRIDGE_INSTANCE'] = instance
+        relay_log = (folder/'relay.log').open('ab')
+        try:
+            relay = subprocess.Popen([sys.executable,'-m','uvicorn','app.gpu_bridge:bridge',
+                                      '--host','127.0.0.1','--port','8010','--no-access-log'],
+                                     cwd=store.ROOT, env=env, stdout=relay_log,stderr=relay_log,
+                                     creationflags=flags)
+        finally: relay_log.close()
+        processes.append(relay)
+        time.sleep(2)
+        if relay.poll() is not None:
+            shutdown()
+            raise ValueError('GPU transfer port 8010 is unavailable. See data/gpu-bridge/relay.log.')
+        # Save the instance before public registration so a later app restart can
+        # recognize this relay even if Cloudflare failed to establish its link.
+        remember_link('https://pending.trycloudflare.com', instance)
     log_stream = log.open('w')
     tunnel = subprocess.Popen([str(executable),'tunnel','--url','http://127.0.0.1:8010',
                                '--no-autoupdate'],stdout=log_stream,stderr=log_stream,
@@ -61,11 +116,17 @@ def connect():
     processes.append(tunnel)
     for _ in range(40):
         if any(p.poll() is not None for p in processes): break
-        match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com',log.read_text(errors='replace'))
-        if match: return match.group(0)
+        contents = log.read_text(errors='replace')
+        if 'Unauthorized: Tunnel not found' in contents:
+            break
+        match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com',contents)
+        if match and 'Registered tunnel connection' in contents:
+            url = match.group(0)
+            if public_link_ready(url, instance):
+                return remember_link(url, instance)
         time.sleep(1)
     shutdown()
-    raise ValueError('Could not open the GPU transfer link. Check your network and retry.')
+    raise ValueError('Could not establish a healthy GPU transfer link. Check your network and retry.')
 
 
 def prepare(item, url):

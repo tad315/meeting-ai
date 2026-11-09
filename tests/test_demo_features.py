@@ -58,8 +58,8 @@ class DemoTests(unittest.TestCase):
 
     def test_summary_saved_and_exported(self):
         item = self.imported()
-        async def fake(messages, provider):
-            return json.dumps({'bullets': [{'text': 'Design was discussed.', 'ids': ['U0001']}]})
+        async def fake(messages, provider, **kwargs):
+            return json.dumps({'bullets': [{'category':'discussion','text': 'Design was discussed.', 'ids': ['U0001']}]})
         with patch('app.demo_features.chat', fake):
             r = self.client.post(f"/api/recordings/{item['id']}/summary", json={'provider': 'ollama'})
             self.assertEqual(r.status_code, 202)
@@ -74,20 +74,22 @@ class DemoTests(unittest.TestCase):
 
     def test_edit_during_summary_rejects_stale_result(self):
         item = self.imported()
-        async def fake(messages, provider):
+        async def fake(messages, provider, **kwargs):
             await asyncio.sleep(.2)
-            return '{"bullets":[{"text":"Design","ids":["U0001"]}]}'
+            return '{"bullets":[{"category":"discussion","text":"Design","ids":["U0001"]}]}'
         with patch('app.demo_features.chat', fake):
             self.client.post(f"/api/recordings/{item['id']}/summary", json={})
             self.client.patch(f"/api/recordings/{item['id']}/segments/U0001", json=dict(revision=1, text='Corrected design.', speaker='0'))
-            time.sleep(.4)
-            result = self.client.get(f"/api/recordings/{item['id']}").json()
+            for _ in range(100):
+                result = self.client.get(f"/api/recordings/{item['id']}").json()
+                if result.get('summary_status') != 'processing':break
+                time.sleep(.02)
         self.assertIsNone(result['summary'])
         self.assertEqual(result['summary_status'], 'error')
 
     def test_bad_citations_rejected(self):
-        async def fake(messages, provider):
-            return '{"bullets":[{"text":"Invented","ids":["U9999"]}]}'
+        async def fake(messages, provider, **kwargs):
+            return '{"bullets":[{"category":"discussion","text":"Invented","ids":["U9999"]}]}'
         item = self.imported()
         with patch('app.demo_features.chat', fake), self.assertRaises(ValueError):
             asyncio.run(draft_summary(item, 'ollama'))

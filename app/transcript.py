@@ -98,7 +98,7 @@ def retrieve(question, segments, limit=16):
     """Lexical retrieval with adjacent turns. Small meetings retain full context."""
     if len(segments) <= limit:
         return segments
-    tokens = lambda text: re.findall(r'[a-z0-9]+', text.lower())
+    tokens = lambda text: re.findall(r'[^\W_]+', text.lower())
     query = set(tokens(question)) - {'the', 'a', 'is', 'what', 'who', 'did', 'was', 'in', 'to', 'of', 'and'}
     documents = [Counter(tokens(s['text'])) for s in segments]
     df = Counter(token for doc in documents for token in doc)

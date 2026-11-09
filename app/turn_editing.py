@@ -23,6 +23,8 @@ def split_turn(segment, offset, at, left_speaker, right_speaker):
         # Original recognition is preserved in the full snapshot, not presented
         # as exact word timing for a newly edited text or manual boundary.
         part.pop('words',None)
+        part.pop('speaker_spans',None)
+        part.pop('speaker_status',None)
         result.append(part)
     return result
 

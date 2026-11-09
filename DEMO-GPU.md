@@ -29,3 +29,56 @@ Local CPU vẫn dùng model cũ. Không tự sửa những transcript đã lưu 
 ## Kiểm chứng
 
 30 kiểm thử backend đã qua, gồm auth của kênh truyền, hết hạn, dữ liệu nhầm/cũ, tự áp dụng và bảo toàn audio. Cú pháp notebook và giao diện đã kiểm tra. Chưa xác nhận đường truyền Cloudflare thực hoặc suy luận GPU trên Colab trong phiên này; cần người dùng cho phép truyền audio và chạy notebook.
+
+
+## Record translation (2026-11-08)
+
+Open a saved recording with a transcript. Select → Tiếng Việt or → English,
+then Dịch bản ghi. Uses the existing Kaggle LLM worker (Qwen3-4B); no extra
+notebook installation or worker version is needed if its llm capability is online.
+Only transcript text is sent. Original text, timestamps, speaker labels, summary,
+and chat remain unchanged. The complete translation is saved separately and can
+be hidden or exported as bilingual .txt. This is text translation, not dubbing.
+
+Transcript edits/reprocessing invalidate the displayed/exported translation.
+Errors retain the previous complete translation. Restart marks interrupted
+translation tasks as errors so they can be retried. Translation accuracy requires
+GPU testing with English and Vietnamese recordings; structural validation cannot
+guarantee faithful meaning. Live translation is not enabled.
+
+
+## Shared Live/Record sentence pipeline — 2026-11-09
+
+The authoritative implementation is app/speech_turns.py. Live imports its
+accepted sentence splitter; session notebooks embed that exact source, including
+a SHA256 fingerprint in Record provenance. No separate copied sentence rule
+exists in the worker. The old REST default remains legacy for compatibility;
+the Record UI explicitly selects the new experimental shared-sentence-v1 mode.
+Baseline Community-1/VBx remains selectable for comparison.
+
+New Record path: Whisper word timestamps -> shared sentence/change-boundary
+units -> Community-1 speaker embeddings with within-unit consistency checks ->
+complete-link cosine clustering over the full recording -> shared timestamp/
+speaker representation. Short or ambiguous samples cannot create a new person.
+Short samples may match a well-supported identity. Unknown output is preserved.
+A sentence is not assumed to contain only one voice: sustained acoustic changes
+can create subunits; isolated word-label fluctuations cannot fragment it.
+
+Live sends settled sentence word timestamps with its acoustic window. The same
+core constructs units and the same embedding extractor is used; identity memory
+is incremental in Live instead of global batch clustering. First captions still
+do not wait for the speaker job. Overlapping context is not double-counted as
+new identity evidence. Both paths remain experimental for speaker accuracy.
+
+Notebook code update is required once for this feature. No dependency reinstall
+is needed in the already-working Kaggle environment. Download refresh preserves
+the session URL/key. Two GPUs are required for parallel Live refinement; the
+Record path itself works on one GPU. Wait for Speaker refinement ready for Live.
+Old workers can use the legacy mode but are explicitly rejected for the new
+Record mode rather than silently using their old grouping logic.
+
+Saved word/timestamp preservation was checked on both the original MP3 ASR
+result and the user's recaptured audio result. This preview does not test the
+new embeddings on GPU. Formal diarization accuracy and display latency still
+require GPU validation. Old recordings/edits/summaries/chats are not migrated or
+reprocessed automatically; normal reprocessing retains the existing backup path.

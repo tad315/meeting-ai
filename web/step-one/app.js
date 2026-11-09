@@ -1,9 +1,12 @@
+import { popup } from './popup.js';
+const uiText = (en, vi) => localStorage.getItem('voxmeet-ui-language') === 'en' ? en : vi;
+import { renderSummary as renderSummaryContent } from './summary-view.js';
 const $ = selector => document.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const clock = value => {const n=Math.floor(value||0);return `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;};
 const active = status => ['recording','queued','decoding','transcribing','cancelling'].includes(status);
 const labels = {recording:'Recording live',queued:'Waiting',decoding:'Preparing audio',uploaded:'Ready to transcribe',transcribing:'Transcribing',cancelling:'Cancelling',cancelled:'Cancelled',ready:'Transcript ready',error:'Needs attention',interrupted:'Interrupted'};
-const stages={loading_models:'Loading local speech models…',recognizing_speech:'Recognizing English speech',identifying_speakers:'Identifying speakers',aligning_words:'Matching words to speaker turns…',saving:'Saving your transcript…',requesting_api:'Waiting for the speech API…'};
+const stages={community_worker:'Community-1 worker is processing your recording…',loading_models:'Loading local speech models…',recognizing_speech:'Recognizing English speech',identifying_speakers:'Identifying speakers',aligning_words:'Matching words to speaker turns…',saving:'Saving your transcript…',requesting_api:'Waiting for the speech API…'};
 const colours=['#e8eed9','#dfecef','#efe5da','#eae2ef','#f1edcf'];
 let recordings=[], current=null, caps=null, uploading=false, polling=false;
 async function api(path, options={}){
@@ -15,29 +18,31 @@ function toast(message){$('#toast').textContent=message;$('#toast').hidden=false
 function renderList(){
   $('#count').textContent=recordings.length;$('#total').textContent=recordings.length;
   const term=$('#search').value.toLowerCase(), rows=recordings.filter(r=>r.title.toLowerCase().includes(term));
-  $('#recordings').innerHTML=rows.map(r=>`<button class="recording" data-id="${escape(r.id)}"><span class="recording-icon" aria-hidden="true">≋</span><div><strong>${escape(r.title)}</strong><small>${escape(new Date(r.created_at).toLocaleDateString('en',{month:'short',day:'numeric'}))} · ${clock(r.duration)} · English</small></div><span class="tag ${escape(r.status)}">${escape(labels[r.status]||r.status)}</span><span aria-hidden="true">↗</span></button>`).join('')||`<div class="empty"><span aria-hidden="true">≋</span><h3>${term?'No matching recordings.':'Your first conversation starts here.'}</h3><p>${term?'Try a different title.':'Upload an English audio file to get started.'}</p></div>`;
+  $('#recordings').innerHTML=rows.map(r=>`<div class="recording-row"><button class="recording" data-id="${escape(r.id)}"><span class="recording-icon" aria-hidden="true">≋</span><div><strong>${escape(r.title)}</strong><small>${escape(new Date(r.created_at).toLocaleDateString(localStorage.getItem('voxmeet-ui-language')==='en'?'en':'vi',{month:'short',day:'numeric'}))} · ${clock(r.duration)} · ${escape(r.language||'en')}</small></div><span class="tag ${escape(r.status)}">${escape(window.voxmeetT?.(labels[r.status]||r.status)||labels[r.status]||r.status)}</span><span aria-hidden="true">↗</span></button><button type="button" class="icon-action danger" data-delete="${escape(r.id)}" title="${uiText('Delete','Xóa')}" aria-label="${uiText('Delete recording','Xóa bản ghi')}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>`).join('')||`<div class="empty"><span aria-hidden="true">≋</span><h3>${term?'No matching recordings.':'Your first conversation starts here.'}</h3><p>${term?'Try a different title.':'Upload an English audio file to get started.'}</p></div>`;
 }
 async function refreshList(){recordings=await api('/recordings');renderList();}
 function refreshMode(){
   const provider=$('#provider').value;
-  const ready=caps&&(provider==='local'?caps.local_ready:caps.deepgram_configured);
-  $('#provider-note').textContent=provider==='local'?'Legacy CPU mode may split one person into several speakers. Use GPU transcript below for Community-1.':'Audio will be sent to Deepgram to transcribe and separate speakers. Provider charges may apply.';
+  const ready=caps&&(provider==='community'?caps.community_worker?.connected:provider==='local'?caps.local_ready:caps.deepgram_configured);
+  $('#record-turn-policy').hidden=provider!=='community';document.querySelector('label[for="record-turn-policy"]').hidden=provider!=='community';
+  $('#provider-note').textContent=provider==='community'?'Whisper đa ngôn ngữ + Community-1 (VBx) on your connected Kaggle GPU. Audio is transferred through Cloudflare. Review speaker labels after processing.':provider==='local'?'Legacy CPU mode may split one person into several speakers. Use GPU transcript below for Community-1.':'Audio will be sent to Deepgram to transcribe and separate speakers. Provider charges may apply.';
   $('#transcribe').disabled=!current?.has_audio||active(current?.status)||!ready;
-  $('#provider').disabled=active(current?.status);
-  $('#speaker-count').disabled=active(current?.status)||provider!=='local';
-  $('#transcribe').textContent=current?.status==='ready'?'Transcribe again →':'Create transcript →';
+  $('#provider').disabled=active(current?.status);$('#audio-language').disabled=active(current?.status);
+  $('#speaker-count').disabled=active(current?.status)||provider==='deepgram';
+  if(provider==='community'&&$('#record-turn-policy').value==='shared-sentence-v1')$('#provider-note').textContent=uiText('Live sentence splitting with full-recording Community-1 / VBx speaker labels.','Chia câu như Live, giữ nhãn phân cụm Community-1 / VBx trên toàn bản ghi.');
+  $('#transcribe').textContent=current?.segments?.length?'Reprocess audio (replace transcript) →':'Create transcript →';
   if(current&&!active(current.status))$('#status').textContent=!ready?'Set up this processing mode before creating a transcript.':current.status==='ready'?'Transcript ready. Compare the words with the original audio.':'Audio prepared. Choose a mode and create your transcript.';
 }
 function renderDetail(){
   if(!current)return;
   const segments=current.segments||[], speakers=current.speakers||{};
   $('#breadcrumb').textContent='Recording';$('#recording-title').textContent=current.title;
-  $('#recording-meta').textContent=`${current.filename||'Audio recording'} · ${clock(current.duration)} · English`;
+  $('#recording-meta').textContent=`${current.filename||'Audio recording'} · ${clock(current.duration)} · ${current.provenance?.language||current.language||'en'}`;
   $('#player').hidden=!current.has_audio;
   const audioPath=`/api/recordings/${current.id}/audio`;
   if(current.has_audio&&$('#audio').getAttribute('src')!==audioPath)$('#audio').src=audioPath;
   const stageLabel=stages[current.stage]||'Processing your recording…';
-  $('#status').textContent={queued:'Waiting for the current processing task…',decoding:'Preparing audio for playback and speech recognition…',transcribing:stageLabel+(current.progress!=null?` · ${current.progress}% of this stage`:''),cancelling:'Cancelling after the current model operation finishes…'}[current.status]||'';
+  $('#status').textContent={queued:'Waiting for the current processing task…',decoding:'Preparing audio for playback and speech recognition…',transcribing:stageLabel+(current.progress!=null?` · ${current.progress}%`:''),cancelling:'Cancelling after the current model operation finishes…'}[current.status]||'';
   $('#progress').hidden=current.status!=='transcribing'||current.progress==null;
   $('#progress').value=current.progress||0;
   $('#cancel').hidden=!['queued','transcribing','cancelling'].includes(current.status)||current.stage==null;
@@ -46,7 +51,7 @@ function renderDetail(){
   $('#error').innerHTML=escape(current.error||'')+(!current.has_audio&&current.error?'<button id="retry-prepare" class="text-button">Retry preparation</button>':'');
   $('#warning').hidden=!current.warning;$('#warning').textContent=current.warning||'';
   $('#export').hidden=current.status!=='ready';$('#export').href=`/api/recordings/${current.id}/export`;
-  $('#stats').textContent=`${Object.keys(speakers).length} speakers · ${segments.length} turns`;
+  $('#stats').textContent=`${Object.keys(speakers).length} ${uiText('speakers','người nói')} · ${segments.length} ${uiText('turns','lượt nói')}`;
   $('#speaker-legend').innerHTML=Object.entries(speakers).map(([id,name])=>`<span class="speaker-chip" style="background:${colours[Number(id)%colours.length]}">● ${escape(name)}</span>`).join('');
   $('#transcript').innerHTML=segments.map(s=>`<article class="turn" data-start="${Number(s.start)}" data-end="${Number(s.end)}"><button class="time" data-time="${Number(s.start)}" aria-label="Play from ${clock(s.start)}">${clock(s.start)}</button><div><span class="speaker" style="background:${colours[Number(s.speaker||0)%colours.length]}">${escape(speakers[s.speaker]||'Unassigned')}</span><p>${escape(s.text)}</p></div></article>`).join('')||`<div class="empty"><span aria-hidden="true">≋</span><h3>${active(current.status)?'Your recording is being processed.':current.status==='ready'?'No speech detected.':'A place for every voice.'}</h3><p>${active(current.status)?'The transcript will appear here when processing finishes.':current.status==='ready'?'Try a recording with clearer speech.':'Create a transcript to see speaker-labelled turns and timestamps.'}</p></div>`;
   refreshMode();
@@ -54,11 +59,13 @@ function renderDetail(){
 async function openRecording(id){
   const item=await api('/recordings/'+id);current=item;
   history.replaceState(null,'',`#recording=${encodeURIComponent(id)}`);
-  $('#library').hidden=true;$('#detail').hidden=false;$('#provider').value=['local','deepgram'].includes(item.provider)?item.provider:'local';$('#speaker-count').value=item.num_speakers||'';renderDetail();
+  $('#library').hidden=true;$('#detail').hidden=false;$('#provider').value=item.provider==='community'||item.provider==='deepgram'?item.provider:'community';$('#speaker-count').value=item.num_speakers||'';$('#audio-language').value=item.language||'auto';$('#record-turn-policy').value=item.turn_policy||'shared-sentence-v1';renderDetail();
 }
 async function refreshCaps(){
   caps=await api('/health');
-  const hasProvider=caps.deepgram_configured||caps.local_ready;
+  const hasProvider=caps.deepgram_configured||caps.local_ready||caps.community_worker?.connected;
+  $('#community-status').textContent=caps.community_worker?.connected?'Worker online — ready to receive recordings.':'Worker offline — start the notebook worker cell.';
+  $('#community-notebook').hidden=!caps.community_worker?.configured;
   $('#readiness').hidden=hasProvider&&caps.ffmpeg_available;
   $('#readiness-text').textContent=!caps.ffmpeg_available?'The audio decoder needs setup before uploading.':'You can upload and play audio now. Configure local models or an API key to create speaker-labelled transcripts.';
   $('#choose-file').disabled=uploading||!caps.ffmpeg_available;
@@ -69,7 +76,7 @@ async function upload(file){
   if(!file||uploading)return;
   if(file.size>100*1024*1024){toast('Choose an audio file smaller than 100 MB.');return;}
   if(!/\.(wav|mp3|m4a|mp4|flac|ogg|webm)$/i.test(file.name)){toast('Choose a supported audio or video file.');return;}
-  uploading=true;$('#choose-file').disabled=true;$('#upload-status').hidden=false;$('#upload-status').textContent=`Uploading ${file.name}…`;
+  uploading=true;$('#choose-file').disabled=true;$('#upload-status').hidden=false;$('#upload-status').textContent=uiText('Uploading ','Đang tải lên ')+file.name+'…';
   try{const form=new FormData();form.append('file',file);const item=await api('/upload',{method:'POST',body:form});await refreshList();await openRecording(item.id);$('#upload-status').hidden=true;}
   catch(error){$('#upload-status').textContent=error.message;}
   finally{uploading=false;$('#choose-file').disabled=!caps?.ffmpeg_available;$('#file').value='';}
@@ -86,7 +93,7 @@ function home(){current=null;history.replaceState(null,'',location.pathname);$('
 $('#home').onclick=home;$('#back').onclick=home;
 $('#transcribe').onclick=async()=>{
   if(!current)return;const id=current.id;$('#transcribe').disabled=true;
-  try{const updated=await api(`/recordings/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('#provider').value,num_speakers:$('#provider').value==='local'&&$('#speaker-count').value?Number($('#speaker-count').value):null})});if(current?.id===id){current=updated;renderDetail();}}
+  try{const updated=await api(`/recordings/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('#provider').value,language:$('#audio-language').value,turn_policy:$('#provider').value==='community'?$('#record-turn-policy').value:'legacy',num_speakers:$('#provider').value!=='deepgram'&&$('#speaker-count').value?Number($('#speaker-count').value):null})});if(current?.id===id){current=updated;renderDetail();}}
   catch(error){toast(error.message);refreshMode();}
 };
 $('#cancel').onclick=async()=>{if(!current)return;const id=current.id;$('#cancel').disabled=true;try{const updated=await api(`/recordings/${id}/cancel`,{method:'POST'});if(current?.id===id){current=updated;renderDetail();}}catch(error){toast(error.message);$('#cancel').disabled=false;}};
@@ -115,14 +122,44 @@ function renderSummary(){
   const busy=current.summary_status==='processing';
   $('#summarize').disabled=busy||active(current.status)||!current.segments?.length;
   $('#summary-provider').disabled=busy;
-  $('#summary-note').textContent=$('#summary-provider').value==='api'
+  $('#summary-note').textContent=$('#summary-provider').value==='kaggle' ? 'Tóm tắt bằng GPU Kaggle. Transcript được gửi tới worker; không dùng CPU máy này.' : $('#summary-provider').value==='api'
     ?'Transcript text will be sent to your configured API provider. Charges may apply.'
     :`Uses Ollama (${caps?.ollama_model||'configured model'}) on this computer. Start Ollama first; CPU processing may take several minutes.`;
   $('#summary-status').textContent=busy?'Creating a draft from the current transcript…':current.summary_error||'';
   const summary=current.summary?.revision===current.revision?current.summary:null;
   $('#summary-export').hidden=!summary;
   $('#summary-export').href=`/api/recordings/${current.id}/summary/export`;
-  $('#summary-result').innerHTML=summary?summary.sections.map(section=>`<ul>${section.bullets.map(b=>`<li>${escape(b.text)}<details><summary>Check source: ${escape(b.ids.join(', '))}</summary>${b.ids.map(id=>{const s=current.segments.find(s=>s.id===id);return s?`<blockquote>[${escape(id)}] ${clock(s.start)} · ${escape(current.speakers[s.speaker]||'Unassigned')}<br>${escape(s.text)}</blockquote>`:'';}).join('')}</details></li>`).join('')}</ul>`).join(''):'<p>No draft yet. Review or edit the transcript, then generate a summary.</p>';
+  const container = $('#summary-result');
+  if (!summary) {
+    container.textContent = 'No draft yet. Review or edit the transcript, then generate a summary.';
+  } else {
+    container.replaceChildren(renderSummaryContent(summary, ids => {
+      const details = document.createElement('details');
+      const heading = document.createElement('summary');
+      heading.textContent = 'Dẫn chứng';
+      details.append(heading);
+      for (const id of ids) {
+        const segment = current.segments.find(row => row.id === id);
+        if (!segment) continue;
+        const quote = document.createElement('blockquote');
+        if (current.has_audio) {
+          const listen = document.createElement('button');
+          listen.type = 'button';
+          listen.className = 'text-button';
+          listen.textContent = '▶ ' + clock(segment.start);
+          listen.onclick = () => {
+            const audio = $('#audio');
+            audio.currentTime = segment.start;
+            audio.play().catch(() => {});
+          };
+          quote.append(listen);
+        }
+        quote.append(document.createTextNode(` [${id}] ${clock(segment.start)} · ${segment.text}`));
+        details.append(quote);
+      }
+      return details;
+    }));
+  }
 }
 const originalRenderDetail=renderDetail;
 renderDetail=function(){
@@ -147,22 +184,13 @@ renderDetail=function(){
   });
   renderSummary();
   renderQA();
-  const unavailable=!current.has_audio||active(current.status)||current.summary_status==='processing';
-  $('#gpu-package').hidden=unavailable;
-  $('#gpu-package').href=`/api/recordings/${current.id}/gpu-package`;
-  $('#gpu-import').disabled=unavailable;
-  $('#gpu-connect').disabled=unavailable||gpuConnecting;
-  const session=current.gpu_session;
-  $('#gpu-connected-notebook').hidden=!session||session.status!=='waiting';
-  $('#gpu-connected-notebook').href=`/api/recordings/${current.id}/connected-notebook`;
-  $('#gpu-connection-status').textContent=gpuConnecting?'Opening transfer link…':session?.error||(session?.status==='waiting'?'Connection ready for one hour. Download this recording’s notebook, open it in Colab, enable T4 + HF_TOKEN and run it. The transcript will return here automatically.':session?.status==='applied'?'GPU transcript received and applied. Review it, then summarize.':'');
   $('#gpu-provenance').textContent=current.provenance?`Current transcript: ${current.provenance.asr_model} + ${current.provenance.diarization_model}`:'Community-1 has not been applied to this recording.';
 };
 $('#summary-provider').onchange=renderSummary;
 $('#summarize').onclick=async()=>{
   if(!current)return;
   const id=current.id;$('#summarize').disabled=true;
-  try{const item=await api(`/recordings/${id}/summary`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('#summary-provider').value})});if(current?.id===id){current=item;renderSummary();}}
+  try{const item=await api(`/recordings/${id}/summary`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('#summary-provider').value,language:$('#summary-language').value})});if(current?.id===id){current=item;renderSummary();}}
   catch(e){toast(e.message);renderSummary();}
 };
 $('#import-colab').onclick=()=>$('#colab-file').click();
@@ -186,35 +214,6 @@ setInterval(async()=>{
   try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderSummary();}}
   catch(e){toast(e.message);}finally{polling=false;}
 },2500);
-
-$('#gpu-import').onclick=()=>$('#gpu-file').click();
-$('#gpu-file').onchange=async()=>{
-  const file=$('#gpu-file').files[0];if(!file||!current)return;
-  const id=current.id;$('#gpu-import').disabled=true;
-  try{
-    const form=new FormData();form.append('file',file);
-    const result=await api(`/recordings/${id}/gpu-result`,{method:'POST',body:form});
-    if(current?.id===id){current=result;renderDetail();}
-    await refreshList();toast('GPU transcript applied. Previous transcript backed up.');
-  }catch(e){toast(e.message);}finally{$('#gpu-file').value='';if(current)renderDetail();}
-};
-
-$('#gpu-connect').onclick=async()=>{
-  if(!current||gpuConnecting)return;
-  const id=current.id;gpuConnecting=true;renderDetail();
-  try{
-    const item=await api(`/recordings/${id}/gpu-session`,{method:'POST'});
-    if(current?.id===id)current=item;
-  }catch(e){toast(e.message);}finally{gpuConnecting=false;if(current)renderDetail();}
-};
-setInterval(async()=>{
-  if(!current||current.gpu_session?.status!=='waiting'||polling||gpuConnecting)return;
-  polling=true;const id=current.id;
-  try{
-    const item=await api(`/recordings/${id}/gpu-session/check`,{method:'POST'});
-    if(current?.id===id){current=item;if(item.gpu_session?.status!=='waiting')renderDetail();}
-  }catch(e){toast(e.message);}finally{polling=false;}
-},4000);
 
 let splitting=null;
 async function openSplit(segment){
@@ -267,7 +266,7 @@ function renderQA(){
     chatRecording=current.id;
     $('#qa-question').value=chatDrafts.get(current.id)||'';
   }
-  $('#qa-note').textContent=$('#qa-provider').value==='api'
+  $('#qa-note').textContent=$('#qa-provider').value==='kaggle' ? 'Hỏi đáp bằng GPU Kaggle, có dẫn chứng từ transcript.' : $('#qa-provider').value==='api'
     ?'Recent chat and transcript excerpts are sent to your configured API provider.'
     :'Chat is saved for this recording. Recent questions help with follow-ups; answers are checked against the transcript. Editing the transcript clears this chat. Local CPU replies may take a few minutes.';
   $('#qa-status').textContent=current.qa_status==='error'?current.qa_error||'Reply failed. Please retry.':'';
@@ -280,12 +279,12 @@ function renderQA(){
   const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;
   const changedRecording=container.dataset.recording!==current.id;
   container.dataset.recording=current.id;chatRenderedKey=key;
-  container.innerHTML=rows.map(q=>`<div class="chat-row user"><div class="chat-bubble"><small>You</small><p>${escape(q.question)}</p></div></div><div class="chat-row assistant"><div class="chat-bubble"><small>VoxMeet</small>${q.answerable?q.points.map(p=>`<p>${escape(p.text)}</p><details><summary>Sources · ${p.evidence.length}</summary>${p.evidence.map(ref=>{const source=current.segments.find(s=>s.id===ref.id);return `<blockquote>${source&&current.has_audio?`<button type="button" class="text-button" data-time="${Number(source.start)}">▶ ${clock(source.start)}</button>`:''} ${escape(source?current.speakers[source.speaker]||'Unassigned':'')}<br>${escape(ref.quote)}</blockquote>`;}).join('')}</details>`).join(''):'<p>I could not find enough support in the selected transcript to answer confidently.</p>'}${q.scope==='retrieved_excerpts'?'<small>Based on selected transcript excerpts.</small>':''}</div></div>`).join('');
+  container.innerHTML=rows.map(q=>`<div class="chat-row user"><div class="chat-bubble"><small>${uiText('You','Bạn')}</small><p>${escape(q.question)}</p></div></div><div class="chat-row assistant"><div class="chat-bubble"><small>VoxMeet</small>${q.answerable?q.points.map(p=>`<p>${escape(p.text)}</p><details><summary>${uiText('Sources','Dẫn chứng')} · ${p.evidence.length}</summary>${p.evidence.map(ref=>{const source=current.segments.find(s=>s.id===ref.id);return `<blockquote>${source&&current.has_audio?`<button type="button" class="text-button" data-time="${Number(source.start)}">▶ ${clock(source.start)}</button>`:''} ${escape(source?current.speakers[source.speaker]||'Unassigned':'')}<br>${escape(ref.quote)}</blockquote>`;}).join('')}</details>`).join(''):`<p>${uiText('I could not find enough support in the selected transcript to answer confidently.','Chưa đủ thông tin trong transcript để trả lời chắc chắn.')}</p>`}${q.scope==='retrieved_excerpts'?`<small>${uiText('Based on selected transcript excerpts.','Dựa trên các đoạn transcript được chọn.')}</small>`:''}</div></div>`).join('');
   if(current.qa_pending){
-    container.innerHTML+=`<div class="chat-row user"><div class="chat-bubble"><small>You</small><p>${escape(current.qa_pending)}</p></div></div>`;
+    container.innerHTML+=`<div class="chat-row user"><div class="chat-bubble"><small>${uiText('You','Bạn')}</small><p>${escape(current.qa_pending)}</p></div></div>`;
     if(busy)container.innerHTML+='<div class="chat-row assistant"><div class="chat-bubble thinking"><small>VoxMeet</small><p>Reading the transcript…</p></div></div>';
   }
-  if(!rows.length&&!current.qa_pending)container.innerHTML='<div class="chat-welcome"><strong>Talk through your recording</strong><p>Try “How long is the nap?” Then ask a follow-up without repeating the full question.</p></div>';
+  if(!rows.length&&!current.qa_pending)container.textContent='';
   if(nearBottom||changedRecording||busy)container.scrollTop=container.scrollHeight;
 }
 $('#qa-provider').onchange=renderQA;
@@ -297,7 +296,7 @@ $('#qa-retry').onclick=()=>{if(current?.qa_pending){$('#qa-question').value=curr
 $('#qa-form').onsubmit=async event=>{
   event.preventDefault();if(!current||chatSending)return;
   const id=current.id,question=$('#qa-question').value.trim();if(!question)return;
-  chatSending=true;renderQA();
+  chatSending=true;current.qa_pending=question;current.qa_status="processing";current.qa_error=null;renderQA();
   try{
     const item=await api(`/recordings/${id}/questions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question,provider:$('#qa-provider').value})});
     if(current?.id===id){
@@ -305,7 +304,7 @@ $('#qa-form').onsubmit=async event=>{
       if($('#qa-question').value.trim()===question){$('#qa-question').value='';chatDrafts.set(id,'');}
       renderQA();$('#qa-question').focus();
     }
-  }catch(e){toast(e.message);}finally{chatSending=false;if(current)renderQA();}
+  }catch(e){if(current?.id===id){current.qa_status="error";current.qa_error=e.message;}toast(e.message);}finally{chatSending=false;if(current)renderQA();}
 };
 setInterval(async()=>{
   if(!current||current.qa_status!=='processing'||polling)return;
@@ -313,3 +312,129 @@ setInterval(async()=>{
   try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderQA();}}
   catch(e){toast(e.message);}finally{polling=false;}
 },2500);
+
+if(window.parent!==window){document.querySelector('a[href="/live"]')?.addEventListener('click',e=>{e.preventDefault();window.parent.postMessage({type:'voxmeet-show-live'},location.origin);});}
+
+if(window.parent!==window){document.querySelector('a[href="/live"]')?.addEventListener('click',e=>{e.preventDefault();window.parent.postMessage({type:'voxmeet-show-live'},location.origin);});}
+
+addEventListener('message',event=>{
+ if(event.origin===location.origin&&event.source===window.parent&&event.data?.type==='voxmeet-refresh-recordings')refreshList().catch(error=>toast(error.message));
+});
+
+addEventListener('voxmeet-worker-status',event=>{
+  if(caps)caps.community_worker=event.detail;
+  if(current)refreshMode();
+});
+
+function notifyRecordingChange(id,deleted=false){
+  const change={type:'voxmeet-recording-changed',id,deleted,at:Date.now()};
+  localStorage.setItem('voxmeet-recording-change',JSON.stringify(change));
+  if(deleted&&sessionStorage.getItem('voxmeet-live-id')===id)sessionStorage.removeItem('voxmeet-live-id');
+  if(parent!==window)parent.postMessage(change,location.origin);
+}
+$('#rename-recording').onclick=async()=>{
+ if(!current)return;const id=current.id;
+ const title=await popup({title:uiText('Rename recording','Đổi tên bản ghi'),value:current.title});if(title===null)return;
+ if(!title.trim()||title.trim().length>150){toast('Enter a name of 1–150 characters.');return;}
+ try{const item=await api('/recordings/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title.trim()})});
+ if(current?.id===id){current=item;renderDetail();}await refreshList();notifyRecordingChange(id);
+ }catch(e){toast(e.message);}
+};
+$('#delete-recording').onclick=async()=>{
+ if(!current)return;const id=current.id;
+ if(!(await popup({title:uiText('Delete recording?','Xóa bản ghi?'),message:uiText('Delete audio, transcript, summaries and chat for ','Xóa audio, transcript, tóm tắt và chat của ')+current.title+'?',destructive:true})))return;
+ try{await api('/recordings/'+id,{method:'DELETE'});notifyRecordingChange(id,true);if(current?.id===id)home();await refreshList();}
+ catch(e){toast(e.message);}
+};
+addEventListener('storage',async e=>{if(e.key!=='voxmeet-recording-change'||!e.newValue)return;
+ try{const c=JSON.parse(e.newValue);if(current?.id===c.id){if(c.deleted)home();else await openRecording(c.id);}await refreshList();}catch(e){}
+});
+
+$('#recordings').addEventListener('click', async event => {
+ const button = event.target.closest('[data-delete]');
+ if (!button) return;
+ event.stopPropagation();
+ const row = recordings.find(item => item.id === button.dataset.delete);
+ if (!row || !(await popup({title:uiText('Delete recording?','Xóa bản ghi?'),message:row.title,destructive:true}))) return;
+ button.disabled = true;
+ try {
+  await api('/recordings/' + row.id, {method:'DELETE'});
+  notifyRecordingChange(row.id, true);
+  await refreshList();
+ } catch (error) { toast(error.message);button.disabled=false; }
+});
+
+window.addEventListener('voxmeet-language-change', renderList);
+
+if(new URLSearchParams(location.search).get('setup')==='1')showSetup();
+
+// Record-only translation UI. The original transcript is never replaced.
+function renderTranslation(){
+  if(!current)return;
+  const panel=$('#translation-panel');if(!panel)return;
+  const busy=current.translation_status==='processing';
+  $('#translate-recording').disabled=busy||active(current.status)||!current.segments?.length;
+  $('#translation-language').disabled=busy;
+  $('#translate-recording').textContent=uiText('Translate','Dịch bản ghi');
+  $('#translation-show-label').textContent=uiText('Show translation','Hiện bản dịch');
+  const fresh=current.translation?.revision===current.revision?current.translation:null;
+  const target=current.translation_target||fresh?.target_language;
+  if(target)$('#translation-language').value=target;
+  const progress=current.translation_progress;
+  $('#translation-status').textContent=busy
+    ?uiText('Translating on Kaggle GPU','Đang dịch bằng GPU Kaggle')+(progress?` · ${progress.done}/${progress.total}`:'…')
+    :current.translation_error||(!fresh&&current.translation?uiText('Transcript changed. Translate again.','Transcript đã thay đổi. Hãy dịch lại.'):'');
+  const link=$('#translation-export');link.hidden=!fresh;
+  link.textContent=uiText('Export bilingual .txt','Xuất song ngữ .txt');
+  link.href=`/api/recordings/${current.id}/translation/export`;
+  document.querySelectorAll('#transcript .turn .turn-translation').forEach(el=>el.remove());
+  if(!fresh||!$('#translation-show').checked)return;
+  const byId=new Map(fresh.segments.map(s=>[s.id,s.text]));
+  document.querySelectorAll('#transcript .turn').forEach((article,index)=>{
+    const text=byId.get(current.segments[index]?.id);if(!text)return;
+    const paragraph=document.createElement('p');paragraph.className='turn-translation';
+    paragraph.lang=fresh.target_language;
+    const label=document.createElement('small');
+    label.textContent=fresh.target_language==='vi'?'Tiếng Việt':'English';
+    paragraph.append(label,document.createElement('br'),document.createTextNode(text));
+    article.lastElementChild.append(paragraph);
+  });
+}
+$('#translation-show').onchange=renderTranslation;
+$('#translate-recording').onclick=async()=>{
+  if(!current)return;const id=current.id;
+  const target=$('#translation-language').value;
+  $('#translate-recording').disabled=true;
+  try{
+    const item=await api(`/recordings/${id}/translation`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({target_language:target})});
+    if(current?.id===id){current=item;$('#translation-show').checked=true;renderTranslation();}
+  }catch(error){toast(error.message);if(current?.id===id)renderTranslation();}
+};
+const renderBeforeTranslation=renderDetail;
+renderDetail=function(){renderBeforeTranslation();renderTranslation();};
+let pollingTranslation=false;
+setInterval(async()=>{
+  if(!current||current.translation_status!=='processing'||pollingTranslation)return;
+  pollingTranslation=true;const id=current.id;
+  try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderTranslation();}}
+  catch(error){toast(error.message);}finally{pollingTranslation=false;}
+},2000);
+
+const renderBeforeAcousticSpans=renderDetail;
+renderDetail=function(){
+  renderBeforeAcousticSpans();if(!current)return;
+  document.querySelectorAll('#transcript .turn').forEach((article,index)=>{
+    const turn=current.segments[index];if(!turn?.speaker_spans?.length)return;
+    const body=article.querySelector('div');const original=body.querySelector('p');
+    const box=document.createElement('div');box.className='acoustic-spans';
+    for(const span of turn.speaker_spans){
+      const label=document.createElement('small');label.textContent=clock(span.start)+' · '+(current.speakers[span.speaker]||uiText('Unassigned','Chưa xác định'));
+      const text=document.createElement('p');text.textContent=span.text;box.append(label,text);
+    }
+    if(original)original.replaceWith(box);
+    const speaker=body.querySelector('.speaker');if(speaker)speaker.hidden=true;
+  });
+};
+
+$('#record-turn-policy').onchange=()=>{if(current)refreshMode();};

@@ -41,7 +41,11 @@ def capabilities():
 
 def check_provider(provider):
     caps = capabilities()
-    if provider == 'deepgram':
+    if provider == 'community':
+        from .community_queue import status
+        if not status()['connected']:
+            raise ValueError('Start the Community-1 Kaggle worker in Setup first.')
+    elif provider == 'deepgram':
         if not caps['deepgram_configured']:
             raise ValueError('Set DEEPGRAM_API_KEY in .env and restart the server to use API transcription.')
     elif provider == 'local':
@@ -110,6 +114,9 @@ async def transcribe(path, provider, num_speakers=None, report=None, cancel=None
 
 
 async def chat(messages, provider, schema=None, keep_alive=0, max_tokens=1000):
+    if provider == 'kaggle':
+        from .remote_tasks import chat as remote_chat
+        return await remote_chat(messages, schema, max_tokens)
     async with httpx.AsyncClient(timeout=900) as client:
         if provider == 'ollama':
             url = os.getenv('OLLAMA_URL', 'http://localhost:11434').rstrip('/') + '/api/chat'
@@ -117,7 +124,7 @@ async def chat(messages, provider, schema=None, keep_alive=0, max_tokens=1000):
                                                         messages=messages, stream=False,
                                                         **({'format': schema} if schema else {}),
                                                         keep_alive=keep_alive,
-                                                        options={'temperature': 0, 'num_ctx': 8192, 'num_predict': max_tokens}))
+                                                        options={'temperature': 0, 'num_ctx': 8192, 'num_predict': max_tokens, 'num_thread': 2}))
             if response.is_error:
                 raise ValueError(f'Ollama returned HTTP {response.status_code}. Start Ollama and download the configured model.')
             return response.json()['message']['content']

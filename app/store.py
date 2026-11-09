@@ -33,6 +33,9 @@ def init():
             if item.get('summary_status') == 'processing':
                 item.update(summary_status='error', summary_error='Summary interrupted. Generate it again.')
                 db.execute('UPDATE meetings SET payload=? WHERE id=?', (json.dumps(item), item['id']))
+            if item.get('translation_status') == 'processing':
+                item.update(translation_status='error', translation_error='Phiên dịch bị gián đoạn. Hãy thử lại.')
+                db.execute('UPDATE meetings SET payload=? WHERE id=?', (json.dumps(item), item['id']))
             if item['status'] in ('recording', 'processing', 'queued', 'decoding', 'transcribing', 'cancelling'):
                 item.update(status='interrupted', error='Processing was interrupted. Retry using the saved audio.')
                 db.execute('UPDATE meetings SET payload=? WHERE id=?', (json.dumps(item), item['id']))
@@ -58,10 +61,21 @@ def get(mid):
     return json.loads(row[0]) if row else None
 
 
+def patch(mid, **changes):
+    """Merge independent live/audio and assistant writes under one transaction."""
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row=db.execute('SELECT payload FROM meetings WHERE id=?',(mid,)).fetchone()
+        if row is None:raise ValueError('Recording not found.')
+        item=json.loads(row[0]);item.update(changes)
+        db.execute('UPDATE meetings SET payload=? WHERE id=?',(json.dumps(item),mid))
+    return item
+
+
 def listing():
     with connect() as db:
         rows = db.execute('SELECT payload FROM meetings ORDER BY rowid DESC').fetchall()
-    return [{k: v for k, v in json.loads(row[0]).items() if k not in ('segments', 'messages', 'summary')} for row in rows]
+    return [{k: v for k, v in json.loads(row[0]).items() if k not in ('segments', 'messages', 'summary', 'translation')} for row in rows]
 
 
 def replace_segments(item, segments, final=False):

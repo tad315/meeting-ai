@@ -1,19 +1,52 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet · Live meeting</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/live.css"></head>
-<body><aside class="sidebar"><a class="brand" href="/">≋ voxmeet <span class="lab">LAB</span></a><a class="nav" href="/">← Recordings</a><span class="nav active">◉ Live meeting</span></aside>
-<main><header>Workspace / Live meeting <span class="tag">English · Local CPU</span></header>
-<section><p class="eyebrow">LISTEN AS IT HAPPENS</p><h1>Your meeting, in words.</h1>
-<p>Record your microphone and meeting audio separately. Live text is a draft and may change.</p>
-<div class="summary-panel"><h2>Audio sources</h2>
-<p>Use Chrome or Edge. For Meet / Zoom in a browser, share its tab and enable “Share tab audio”. For desktop meetings, choose a screen with system audio if offered. Headphones help prevent duplicate audio.</p>
-<label><input id="mic" type="checkbox" checked> Room microphone</label>
-<label><input id="system" type="checkbox" checked> Meeting tab / system audio</label>
-<p>Source labels are not speaker identities. This first live version does not yet identify individual speakers.</p>
-<button id="start" class="button" disabled>Start meeting</button> <button id="stop" class="button secondary" disabled>Stop & save</button>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet · Live meeting</title><link rel="stylesheet" href="/style.css?v=8"><link rel="stylesheet" href="/live.css"><link rel="stylesheet" href="/chat-dock.css?v=10"><link rel="stylesheet" href="/vintage.css?v=5"></head>
+<body class="function-page menu-collapsed"><aside class="sidebar">
+  <a class="brand" href="/" aria-label="VoxMeet home"><span class="logo" aria-hidden="true">≋</span>voxmeet<span class="lab">LAB</span></a>
+  <div class="sidebar-caption">YOUR WORKSPACE</div>
+  <button id="show-recordings" class="nav"><span aria-hidden="true">▤</span> Recordings <span id="count" class="count">0</span></button>
+  <button id="show-live" class="nav active">◉ Live meeting</button>
+  <button id="setup" class="nav"><span aria-hidden="true">⚙</span> Setup</button>
+  
+</aside>
+<main><header><span id="workspace-title">Workspace / Live meeting</span> <span class="tag">Việt / English · GPU hoặc CPU</span></header>
+<section id="live-panel"><h1>Live meeting</h1>
+<p id="session-name"></p><div class="live-actions"><button id="new-meeting" class="button secondary">New meeting</button> <button id="delete-live" class="button secondary danger" hidden>Delete meeting</button></div>
+
+<div class="summary-panel"><h2>Audio sources</h2><label>Nhận diện <select id="live-provider"><option value="kaggle">Kaggle GPU · Việt / English</option><option value="local">CPU cũ · English</option></select></label><label>Ngôn ngữ <select id="live-language"><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="auto">Tự nhận diện</option></select></label>
+
+<label><span id="source-mode-label">Nguồn thu</span>
+<select id="source-mode" aria-label="Nguồn thu / Audio source">
+<option value="tab" selected>Âm thanh tab / hệ thống</option>
+<option value="mic">Mic trong phòng</option>
+<option value="both">Kết hợp mic + tab</option>
+</select></label>
+<input id="mic" type="checkbox" hidden><input id="system" type="checkbox" checked hidden>
+
+<button id="start" class="button" disabled>Start meeting</button> <button id="stop" class="button secondary" disabled>Pause & save</button>
 <p id="state" role="status">Checking streaming model…</p><p id="error" class="error" hidden></p>
 <div class="live-meters"><label>Microphone <meter id="mic-level" min="0" max="1" value="0"></meter></label><label>Meeting audio <meter id="system-level" min="0" max="1" value="0"></meter></label></div>
-<p id="timing">The 1–2 second target is not yet validated on your microphone.</p><a id="saved" class="button" hidden>Open saved meeting →</a>
+<p id="timing"></p><a id="saved" class="button" hidden>Open saved meeting →</a>
 </div>
-<h2>Live transcript <span class="tag">Draft</span></h2><p>Text updates while you speak. A pause settles the current turn; final speaker review happens after the meeting.</p>
+<h2>Live transcript <span class="tag">Draft</span></h2>
 <div id="turns" aria-live="polite"></div>
-<p class="privacy">Audio is stored on this computer. Maximum 30 minutes. Tell participants before recording. Closing this page stops capture; only audio already received by the server can be saved.</p>
-</section></main><script src="/live.js" type="module"></script></body></html>
+
+<section class="summary-panel" id="live-assistant">
+<h2>Meeting assistant</h2><p id="assistant-coverage">Ask or summarize without leaving this meeting. Uses settled transcript turns only.</p>
+<label>Tóm tắt <select id="live-summary-language"><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="auto">Theo transcript</option></select></label><label>Trợ lý <select id="live-assistant-provider"><option value="kaggle">Kaggle GPU</option><option value="ollama">Local Ollama</option><option value="api">API đã cấu hình</option></select></label><button id="live-summarize" class="button secondary" disabled>Summarize so far</button>
+<p id="summary-state" role="status"></p><div id="live-summary"></div>
+<details><summary>Earlier summaries</summary><div id="summary-history"></div></details>
+<h3>Chat about this meeting</h3><div id="live-chat" role="log" aria-live="polite"></div>
+<form id="live-question-form"><label for="live-question">Your question</label><textarea id="live-question" rows="2" maxlength="1000" required placeholder="Ask about what has been said so far…"></textarea><button id="live-ask" class="button" disabled>Send</button></form>
+<p id="question-state" role="status"></p>
+</section></section>
+<section id="library-panel" hidden><iframe id="recordings-frame" title="Recordings library"></iframe></section></main><dialog id="setup-dialog"><div class="dialog-heading"><div><p class="eyebrow">GET READY TO TRANSCRIBE</p><h2>Processing setup</h2></div><button id="close-setup" class="close" aria-label="Close setup">×</button></div>
+  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><section class="summary-panel"><h3>Community-1 automatic worker</h3>
+<p>Start one private Kaggle GPU notebook per session. Then use Create transcript here for each recording; audio, đoạn live và transcript dùng cho tóm tắt/chat được gửi tới Kaggle qua Cloudflare khi chọn chế độ GPU. Keep the local server running.</p>
+<button id="community-connect" class="button" type="button">Connect Kaggle worker</button>
+<a id="community-notebook" class="button secondary" href="/api/community-worker/notebook" hidden>Download session notebook</a>
+<p id="community-status" role="status"></p>
+<p>In Kaggle: import the notebook, enable GPU and Internet, add HF_TOKEN in Secrets, then run setup and the worker cell. Do not share this notebook: it contains a temporary connection key.</p></section><div id="connections"></div>
+  <details open><summary>Local · No account required</summary><p>Run <code>setup.ps1 -LocalModels</code> once to install the libraries and download English Whisper and speaker recognition models. After setup, recordings are processed on this computer without sending audio elsewhere.</p><p>No API key or Hugging Face token is needed. CPU processing can take longer than the recording itself.</p></details>
+  <details><summary>API · Deepgram</summary><p>Set <code>DEEPGRAM_API_KEY</code> in <code>meeting-ai/.env</code> and restart. This may incur provider usage charges. The key stays on the backend.</p></details>
+  <details><summary>Summary · Local or API</summary><p>For local drafts, start Ollama and run <code>ollama pull qwen2.5:3b</code>. Set <code>OLLAMA_MODEL=qwen2.5:3b</code> in .env. CPU generation can take several minutes. API mode uses <code>LLM_API_URL</code>, <code>LLM_API_KEY</code>, and <code>LLM_API_MODEL</code>; selecting it sends transcript text to that provider.</p><p>Chế độ Kaggle GPU dùng worker đang kết nối để nhận diện, tóm tắt và hỏi đáp. Không cần bật Ollama khi chọn GPU. Lần đầu tải model có thể lâu hơn.</p></details>
+  <p class="setup-note">Local status checks installed libraries and downloaded files. API status checks only whether a key is configured. Full instructions are in <code>meeting-ai/README.md</code>.</p><button id="refresh-setup" class="button secondary">Refresh connection status</button>
+</dialog><script src="/live.js?v=19" type="module"></script><script type="module" src="/chat-dock.js?v=10"></script><script type="module" src="/community-setup.js?v=13"></script><script type="module" src="/ui-language.js?v=12"></script></body></html>
