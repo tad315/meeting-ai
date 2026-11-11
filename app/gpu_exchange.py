@@ -1,6 +1,9 @@
 """Validated file exchange between the local demo and a user-run GPU notebook."""
 import hashlib
 import json
+import subprocess
+import tempfile
+import wave
 import zipfile
 from pathlib import Path
 
@@ -14,7 +17,34 @@ def audio_hash(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def make_package(item, target):
+def pcm_hash(path):
+    """SHA-256 of the raw 16-bit mono PCM frames, independent of container."""
+    digest = hashlib.sha256()
+    with wave.open(str(path)) as audio:
+        if audio.getsampwidth() != 2 or audio.getnchannels() != 1:
+            raise ValueError('Expected 16-bit mono WAV.')
+        while frames := audio.readframes(1 << 16):
+            digest.update(frames)
+    return digest.hexdigest()
+
+
+def encode_flac(source, target):
+    """Lossless FLAC copy of the normalized WAV; roughly half the transfer size."""
+    from .providers import ffmpeg_path
+    binary = ffmpeg_path()
+    if not binary:
+        raise ValueError('FFmpeg is missing.')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    result = subprocess.run([binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                             '-i', str(source), '-map_metadata', '-1', '-c:a', 'flac',
+                             '-sample_fmt', 's16', '-compression_level', '5', '-y', str(target)],
+                            capture_output=True, timeout=300, creationflags=flags)
+    if result.returncode or not Path(target).is_file():
+        raise ValueError('FLAC encoding failed.')
+    return target
+
+
+def make_package(item, target, audio_format='wav'):
     metadata = dict(schema='voxmeet-gpu-v1', recording_id=item['id'],
                     revision=item['revision'], title=item['title'],
                     audio_sha256=audio_hash(item['audio']), duration=item['duration'],
@@ -22,9 +52,18 @@ def make_package(item, target):
                     language=item.get('language', 'en'), clustering='VBxClustering',
                     turn_policy=item.get('turn_policy','legacy'))
     partial = target.with_suffix('.part')
-    with zipfile.ZipFile(partial, 'w', zipfile.ZIP_STORED) as archive:
-        archive.write(item['audio'], 'audio.wav')
-        archive.writestr('job.json', json.dumps(metadata))
+    with tempfile.TemporaryDirectory(dir=Path(target).parent) as scratch:
+        audio_path, audio_name = Path(item['audio']), 'audio.wav'
+        if audio_format == 'flac':
+            try:
+                audio_path = encode_flac(item['audio'], Path(scratch) / 'audio.flac')
+                metadata.update(audio_format='flac', pcm_sha256=pcm_hash(item['audio']))
+                audio_name = 'audio.flac'
+            except (OSError, ValueError, subprocess.SubprocessError):
+                audio_path, audio_name = Path(item['audio']), 'audio.wav'  # always fall back to WAV
+        with zipfile.ZipFile(partial, 'w', zipfile.ZIP_STORED) as archive:
+            archive.write(audio_path, audio_name)
+            archive.writestr('job.json', json.dumps(metadata))
     partial.replace(target)
     return target
 

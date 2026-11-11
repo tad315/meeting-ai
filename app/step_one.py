@@ -47,7 +47,19 @@ async def lifespan(app):
     app.state.queue = asyncio.Lock()
     app.state.live_lock = asyncio.Lock()
     app.state.gpu_lock = asyncio.Lock()
+
+    async def relay_watchdog():
+        # The Kaggle relay is a separate process; restart it if it stopped so
+        # an already-running worker notebook reconnects on its own.
+        while True:
+            try:
+                await asyncio.to_thread(gpu_connection.ensure_relay)
+            except Exception:
+                pass
+            await asyncio.sleep(15)
+    watchdog = asyncio.create_task(relay_watchdog())
     yield
+    watchdog.cancel()
     # The authenticated relay persists so notebook URLs survive app restarts.
     await live_translation.shutdown()
     pending = list(tasks)
@@ -271,7 +283,8 @@ async def run_transcription(mid):
     try:
         async with app.state.queue:
             if item['provider'] == 'community':
-                folder = community_queue.enqueue(item)
+                # Hashing/FLAC encoding is disk work; keep the event loop responsive.
+                folder = await asyncio.to_thread(community_queue.enqueue, item)
                 try:
                     update(item, status='transcribing', stage='community_worker', progress=None)
                     def gpu_progress(stage,percentage,warning):

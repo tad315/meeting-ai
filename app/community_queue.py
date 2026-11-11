@@ -93,7 +93,9 @@ def enqueue(item):
     sid = uuid.uuid4().hex
     folder = root() / sid
     folder.mkdir()
-    make_package(item, folder / 'job.zip')
+    # Workers that advertise FLAC receive a lossless, ~2x smaller package.
+    audio_format = 'flac' if 'flac_audio' in worker_status(worker).get('features', []) else 'wav'
+    make_package(item, folder / 'job.zip', audio_format=audio_format)
     config = dict(worker_id=worker[0], recording_id=item['id'], revision=item['revision'],
                   expires=worker[2]['expires'], token_hash=worker[2]['token_hash'])
     # Publish only after the package is complete.

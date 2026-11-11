@@ -11,14 +11,18 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from .gpu_payloads import MAX_GPU_RESULT_BYTES, ERROR_MESSAGES
+from .relay_version import relay_code_version
 
 bridge = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 ROOT = Path(os.environ.get('VOXMEET_BRIDGE_DATA', Path(__file__).resolve().parents[1] / 'data/gpu-bridge'))
+# Fixed when this relay process starts; the app compares it with the code on disk.
+CODE_VERSION = relay_code_version()
+KNOWN_FEATURES = ('multilingual','llm','live_asr','live_speakers','live_refine','shared_turns','flac_audio')
 
 
 @bridge.get('/bridge-health')
 async def bridge_health():
-    return {'instance': os.environ.get('VOXMEET_BRIDGE_INSTANCE', ''), 'scheduler': 'fair-live-chat-v1', 'worker_readiness': 'preload-v2.5', 'result_transport': 'long-record-v2.6'}
+    return {'instance': os.environ.get('VOXMEET_BRIDGE_INSTANCE', ''), 'scheduler': 'fair-live-chat-v1', 'worker_readiness': 'preload-v2.5', 'result_transport': 'long-record-v2.6', 'code': CODE_VERSION}
 
 
 def authorized(sid, request):
@@ -52,7 +56,10 @@ async def heartbeat(sid: str, request: Request):
         try:
             payload = json.loads(body)
             features = payload.get('features', [])
-            if not isinstance(features, list) or any(f not in ('multilingual','llm','live_asr','live_speakers','live_refine','shared_turns') for f in features): raise ValueError()
+            if not isinstance(features, list) or len(features) > 32 or any(not isinstance(f, str) for f in features): raise ValueError()
+            # A newer worker may advertise capabilities this relay does not know.
+            # Ignore them instead of rejecting the heartbeat (worker would look offline).
+            features = [f for f in features if f in KNOWN_FEATURES]
             runtime=None
             if 'runtime_id' in payload:
                 if not isinstance(payload['runtime_id'],str) or not re.fullmatch('[0-9a-f]{32}',payload['runtime_id']):raise ValueError()

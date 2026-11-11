@@ -18,9 +18,22 @@ class TunnelRecoveryTests(unittest.TestCase):
     def tearDown(self):
         self.p.stop();self.tmp.cleanup()
     def test_healthy_local_relay_can_be_reused_when_public_url_dies(self):
-        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=[OSError('DNS'),io.BytesIO(json.dumps({'instance':self.instance}).encode())]):
+        health=json.dumps({'instance':self.instance,'code':gpu_connection.relay_code_version()}).encode()
+        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=[OSError('DNS'),io.BytesIO(health)]):
             self.assertIsNone(gpu_connection.reusable_link())
             self.assertEqual(gpu_connection.local_relay_instance(),self.instance)
+    def test_relay_running_old_code_is_replaced_not_reused(self):
+        old=json.dumps({'instance':self.instance,'code':'old'}).encode()
+        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=lambda *a,**k:io.BytesIO(old)), \
+                patch.object(gpu_connection,'stop_stale_relay',return_value=True) as stop:
+            self.assertIsNone(gpu_connection.reusable_link())
+            self.assertIsNone(gpu_connection.local_relay_instance())
+            stop.assert_called_once()
+        legacy=json.dumps({'instance':self.instance}).encode()
+        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=lambda *a,**k:io.BytesIO(legacy)), \
+                patch.object(gpu_connection,'stop_stale_relay',return_value=True) as stop:
+            self.assertIsNone(gpu_connection.local_relay_instance())
+            stop.assert_called_once()
     def test_unrelated_relay_or_unhealthy_public_link_is_never_reused(self):
         with patch('app.gpu_connection.urllib.request.urlopen',return_value=io.BytesIO(b'{"instance":"someone-else"}')):
             self.assertIsNone(gpu_connection.local_relay_instance())
@@ -44,5 +57,29 @@ class TunnelRecoveryTests(unittest.TestCase):
             finally:
                 if gpu_connection.log_stream:
                     gpu_connection.log_stream.close();gpu_connection.log_stream=None
+
+    def test_watchdog_restarts_stopped_relay_with_same_instance(self):
+        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=OSError('refused')), \
+                patch.object(gpu_connection,'start_relay',return_value=True) as start:
+            self.assertTrue(gpu_connection.ensure_relay())
+            start.assert_called_once_with(self.instance)
+    def test_watchdog_never_touches_foreign_service_or_healthy_relay(self):
+        for health,expected in (({'instance':'b'*32},False),({'instance':self.instance,'code':gpu_connection.relay_code_version()},True)):
+            with patch('app.gpu_connection.urllib.request.urlopen',side_effect=lambda *a,**k:io.BytesIO(json.dumps(health).encode())), \
+                    patch.object(gpu_connection,'start_relay') as start, patch.object(gpu_connection,'stop_stale_relay') as stop:
+                self.assertEqual(gpu_connection.ensure_relay(),expected)
+                start.assert_not_called();stop.assert_not_called()
+    def test_watchdog_replaces_old_code_relay_and_skips_during_connect(self):
+        old=json.dumps({'instance':self.instance,'code':'old'}).encode()
+        with patch('app.gpu_connection.urllib.request.urlopen',side_effect=lambda *a,**k:io.BytesIO(old)), \
+                patch.object(gpu_connection,'stop_stale_relay',return_value=True), \
+                patch.object(gpu_connection,'start_relay',return_value=True) as start:
+            self.assertTrue(gpu_connection.ensure_relay());start.assert_called_once_with(self.instance)
+        with gpu_connection.relay_lock, patch.object(gpu_connection,'start_relay') as start:
+            self.assertFalse(gpu_connection.ensure_relay());start.assert_not_called()
+    def test_no_saved_tunnel_means_nothing_to_restart(self):
+        (self.folder/'tunnel-state.json').unlink()
+        with patch.object(gpu_connection,'start_relay') as start:
+            self.assertFalse(gpu_connection.ensure_relay());start.assert_not_called()
 
 if __name__=='__main__':unittest.main()
