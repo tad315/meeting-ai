@@ -62,12 +62,11 @@
   </section>
 </main>
 <dialog id="setup-dialog"><div class="dialog-heading"><div><p class="eyebrow">GET READY TO TRANSCRIBE</p><h2>Processing setup</h2></div><button id="close-setup" class="close" aria-label="Close setup">×</button></div>
-  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><section class="summary-panel"><h3>Community-1 automatic worker</h3>
-<p>Start one private Kaggle GPU notebook per session. Then use Create transcript here for each recording; audio, đoạn live và transcript dùng cho tóm tắt/chat được gửi tới Kaggle qua Cloudflare khi chọn chế độ GPU. Keep the local server running.</p>
-<button id="community-connect" class="button" type="button">Connect Kaggle worker</button>
-<a id="community-notebook" class="button secondary" href="/api/community-worker/notebook" hidden>Download session notebook</a>
+  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><section class="summary-panel"><h3>Community-1 · Kaggle GPU</h3>
+<button id="community-connect" class="button" type="button">Kết nối worker Kaggle</button>
+<a id="community-notebook" class="button secondary" href="/api/community-worker/notebook" hidden>Tải notebook Kaggle</a>
 <p id="community-status" role="status"></p>
-<p>In Kaggle: import the notebook, enable GPU and Internet, add HF_TOKEN in Secrets, then run setup and the worker cell. Do not share this notebook: it contains a temporary connection key.</p></section>
+<p>Bật GPU, Internet và Secret HF_TOKEN trong notebook Kaggle. Giữ server local chạy; không chia sẻ notebook chứa khóa phiên.</p></section>
 <div id="connections"></div>
   <details open><summary>Local · No account required</summary><p>Run <code>setup.ps1 -LocalModels</code> once to install the libraries and download English Whisper and speaker recognition models. After setup, recordings are processed on this computer without sending audio elsewhere.</p><p>No API key or Hugging Face token is needed. CPU processing can take longer than the recording itself.</p></details>
   <details><summary>API · Deepgram</summary><p>Set <code>DEEPGRAM_API_KEY</code> in <code>meeting-ai/.env</code> and restart. This may incur provider usage charges. The key stays on the backend.</p></details>
@@ -86,5 +85,5 @@
 <p>Confirm the change of voice by listening. The original turn is backed up and the old summary is cleared. You can split either part again.</p>
 <button id="split-save" class="button" type="submit">Save split</button>
 <button id="split-cancel" class="button secondary" type="button">Cancel</button></form></dialog>
-<script src="/app.js?v=17" type="module"></script>
-<script type="module" src="/chat-dock.js?v=10"></script><script type="module" src="/community-setup.js?v=13"></script><script type="module" src="/ui-language.js?v=12"></script></body></html>
+<script src="/app.js?v=19" type="module"></script>
+<script type="module" src="/chat-dock.js?v=10"></script><script type="module" src="/community-setup.js?v=15"></script><script type="module" src="/ui-language.js?v=12"></script></body></html>

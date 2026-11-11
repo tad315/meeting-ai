@@ -22,3 +22,14 @@ body.library-view>main>header{flex-shrink:0}
 /* Recordings starts directly below the workspace header. */
 #library-panel{padding:0;gap:0;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
 #recordings-frame{grid-column:1;grid-row:1}
+
+/* Paired translation follows the same sentence and scroll position. */
+.live-translation-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0;color:#365045;font-size:13px}
+.live-translation-controls select{max-width:240px;background:#faf7ee;border:1px solid #b9b89a;padding:9px 12px;color:#304b40}
+.bilingual-head{display:grid;grid-template-columns:1fr 1fr;border-block:1px solid #c9c9b1;background:#eeeedf;color:#365045;font-size:13px}
+.bilingual-head[hidden]{display:none}.bilingual-head span{padding:12px 16px}
+#turns.bilingual .live-turn{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0;padding:0}
+#turns.bilingual .live-original,#turns.bilingual .live-translated{padding:14px 16px;overflow-wrap:anywhere;min-width:0}
+#turns.bilingual .live-translated{border-left:1px solid #d3d1ba;background:rgba(232,235,213,.25)}
+.live-translated.translation-pending{color:#777d6c;font-style:italic}
+@media(max-width:650px){#turns.bilingual .live-turn{grid-template-columns:1fr}#turns.bilingual .live-translated{border-left:0;border-top:1px dashed #d3d1ba}.bilingual-head{display:none}}

@@ -27,6 +27,10 @@ def init():
         db.execute('CREATE TABLE IF NOT EXISTS meetings (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         for row in db.execute('SELECT id, payload FROM meetings').fetchall():
             item = json.loads(row['payload'])
+            if (item.get('live_translation') or {}).get('enabled') and item['live_translation'].get('status')!='ready':
+                state=dict(item['live_translation'],enabled=False,status='error',error='Dịch bị gián đoạn khi khởi động lại. Chọn chiều dịch để tiếp tục; bản dịch đã lưu vẫn còn.')
+                item['live_translation']=state
+                db.execute('UPDATE meetings SET payload=? WHERE id=?',(json.dumps(item),item['id']))
             if item.get('qa_status') == 'processing':
                 item.update(qa_status='error',qa_error='Question interrupted. Ask again.')
                 db.execute('UPDATE meetings SET payload=? WHERE id=?', (json.dumps(item), item['id']))

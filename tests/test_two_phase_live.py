@@ -56,7 +56,7 @@ class BackgroundIntegrationTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.data=Path(self.tmp.name)
         self.p=patch.object(store,'DATA',self.data);self.p.start();store.init()
     def tearDown(self):self.p.stop();self.tmp.cleanup()
-    def test_caption_is_sent_before_refinement_and_ids_text_audio_are_preserved(self):
+    def test_live_uses_source_labels_without_refinement_and_preserves_audio(self):
         jobs=[]
         class Socket:
             def __init__(self):self.remaining=10;self.sent=[]
@@ -83,9 +83,11 @@ class BackgroundIntegrationTests(unittest.TestCase):
             asyncio.run(live_rolling.capture(socket,dict(sources=[False,True],language='en')))
         saved=next(m for m in socket.sent if m['type']=='saved')
         item=store.get(saved['id'])
-        self.assertTrue(any(task['kind']=='live_refine' for task,_ in jobs))
+        self.assertTrue(jobs)
+        self.assertTrue(all(task['kind']=='live_asr' for task,_ in jobs))
+        self.assertEqual(item['live_speaker_mode'],'source_only')
         self.assertEqual(item['segments'][0]['text'],'Hello.')
-        self.assertEqual(item['segments'][0]['speaker'],'1_speaker_1')
+        self.assertEqual(item['segments'][0]['speaker'],'1')
         self.assertTrue(item['segments'][0]['words'])
         committed=[t for m in socket.sent if m['type']=='update' for t in m['turns'] if t.get('committed')]
         self.assertEqual(committed[0]['id'],item['segments'][0]['id'])
@@ -104,7 +106,8 @@ class BackgroundIntegrationTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(credentials['WORKER_KEY'].encode()).hexdigest(),worker[2]['token_hash'])
         self.assertTrue(credentials['WORKER_URL'].endswith('/worker/'+worker[0]))
         self.assertIn('def refine_speakers',source)
-        self.assertIn('background_refinement.start()',source)
+        self.assertIn('background_assistant.start()',source)
+        self.assertNotIn('refinement_warmup.start()',source)
 
     def test_bridge_accepts_new_capability_but_prioritizes_asr(self):
         community_queue.create('https://test.trycloudflare.com');worker=community_queue.current()

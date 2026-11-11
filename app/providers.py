@@ -43,8 +43,8 @@ def check_provider(provider):
     caps = capabilities()
     if provider == 'community':
         from .community_queue import status
-        if not status()['connected']:
-            raise ValueError('Start the Community-1 Kaggle worker in Setup first.')
+        if not status().get('available_for_jobs',False):
+            raise ValueError('Vào Setup và chạy worker Kaggle trước.')
     elif provider == 'deepgram':
         if not caps['deepgram_configured']:
             raise ValueError('Set DEEPGRAM_API_KEY in .env and restart the server to use API transcription.')

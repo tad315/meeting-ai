@@ -1,0 +1,27 @@
+{
+  "scope": "isolated local HTTP; synthetic 1000-turn transcript; not GPU/browser latency",
+  "metrics": {
+    "/api/recordings/perf-fixture": {
+      "p50_ms": 16.28,
+      "p95_ms": 41.32,
+      "response_bytes": 143312
+    },
+    "/api/live/status": {
+      "p50_ms": 3.49,
+      "p95_ms": 26.16,
+      "response_bytes": 264
+    },
+    "/live": {
+      "p50_ms": 5.05,
+      "p95_ms": 7.05,
+      "response_bytes": 7419
+    },
+    "/live.js?v=22": {
+      "p50_ms": 5.59,
+      "p95_ms": 7.41,
+      "response_bytes": 26610
+    }
+  },
+  "offline_translation_rejected": true,
+  "source_preserved": true
+}

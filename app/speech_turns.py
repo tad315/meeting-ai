@@ -405,6 +405,25 @@ def verify_window_sequence(windows, labels, ready):
     """
     import math
     windows=[dict(w) for w in windows]
+    # Compute support once per contiguous acoustic run, not once per window.
+    # Keep the exact winning-score/interval criteria used by the old scan.
+    run_support=[0]*len(windows)
+    keys=[];strong=[]
+    for window in windows:
+        values=window.get('scores',[])
+        valid_run=(len(values)==len(labels) and bool(values) and
+                   all(type(x) in (int,float) and math.isfinite(x) for x in values))
+        winner=max(range(len(values)),key=lambda k:values[k]) if valid_run else None
+        keys.append((window.get('interval'),winner) if valid_run else None)
+        ranked_values=sorted(values,reverse=True) if valid_run else []
+        strong.append(int(len(ranked_values)>1 and ranked_values[0]>=.30 and ranked_values[0]-ranked_values[1]>=.15))
+    start=0
+    while start<len(windows):
+        end=start+1
+        while keys[start] is not None and end<len(windows) and keys[end]==keys[start]:end+=1
+        total=sum(strong[start:end])
+        run_support[start:end]=[total]*(end-start)
+        start=end
     for i,w in enumerate(windows):
         scores=w.get('scores',[])
         valid=(ready and len(labels)>=2 and len(scores)==len(labels)
@@ -418,29 +437,7 @@ def verify_window_sequence(windows, labels, ready):
             w.update(score=score,margin=margin,verified=accepted,speaker=labels[chosen] if accepted else w.get('baseline'),
                      verification='short_direct' if accepted else 'baseline_fallback')
             continue
-        center=(w['start']+w['end'])/2
-        neighbors=[]
-        for j in range(max(0,i-3),min(len(windows),i+4)):
-            v=windows[j];vscore=v.get('scores',[])
-            if v.get('interval')!=w.get('interval') or abs((v['start']+v['end'])/2-center)>.85:continue
-            if len(vscore)!=len(labels) or not all(type(x) in (int,float) and math.isfinite(x) for x in vscore):continue
-            r=sorted(range(len(vscore)),key=lambda k:vscore[k],reverse=True)
-            if len(r)>1 and vscore[r[0]]>=.30 and vscore[r[0]]-vscore[r[1]]>=.15:neighbors.append((j,r[0]))
-        # A consistent winning voice may start with a mixed transition
-        # window. Confirm the run from its clearer interior, not only a
-        # symmetric neighborhood (which rejects both ends of short replies).
-        run=[]
-        for direction in (-1,1):
-            j=i+direction
-            while 0<=j<len(windows):
-                v=windows[j];vs=v.get('scores',[])
-                if v.get('interval')!=w.get('interval') or len(vs)!=len(labels) or not vs:break
-                if not all(type(x) in (int,float) and math.isfinite(x) for x in vs):break
-                if max(range(len(vs)),key=lambda k:vs[k])!=chosen:break
-                run.append(vs);j+=direction
-        run.append(scores)
-        support=sum(max(vs)>=.30 and sorted(vs,reverse=True)[0]-sorted(vs,reverse=True)[1]>=.15 for vs in run if len(vs)>1)
-        agrees=support>=3
+        agrees=run_support[i]>=3
         direct=bool(valid and score>=.45 and margin>=.10)
         temporal=bool(valid and score>=.30 and margin>=.07 and agrees)
         # A sequence decoder is a regularizer, never permission to pick a

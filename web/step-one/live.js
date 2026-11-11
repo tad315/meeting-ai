@@ -7,6 +7,35 @@ const $=s=>document.querySelector(s);
 let socket,context,worklet,streams=[],nodes=[],active=false,stopping=false,sent=0,ack=0,turns=new Map(),savedId=new URLSearchParams(location.search).get('meeting')||sessionStorage.getItem('voxmeet-live-id');
 const fail=message=>{$('#error').hidden=false;$('#error').textContent=message;};
 async function cleanup(){active=false;for(const s of streams)for(const t of s.getTracks())t.stop();streams=[];for(const n of nodes)n.disconnect();nodes=[];if(context){const old=context;context=null;old.close().catch(()=>{});}active=false;$('#stop').disabled=true;$('#live-provider').disabled=false;$('#live-language').disabled=false;$('#mic').disabled=false;$('#system').disabled=false;$('#source-mode').disabled=false;$('#start').disabled=socket?.readyState===0||socket?.readyState===1;$('#new-meeting').disabled=$('#start').disabled;$('#start').textContent=savedId?'Resume meeting':'Start meeting';}
+let liveTranslations=new Map();
+let configuringTranslation=false;
+function bilingualMode(){return $('#live-translation-mode').value!=='off';}
+function updateBilingualLayout(){
+ const enabled=bilingualMode();$('#turns').classList.toggle('bilingual',enabled);$('#bilingual-head').hidden=!enabled;
+ const direction=$('#live-translation-mode').value;
+ $('#original-heading').textContent=direction==='en-vi'?'English':'Tiếng Việt';
+ $('#translated-heading').textContent=direction==='en-vi'?'Tiếng Việt':'English';
+ $('#live-translation-label').textContent=uiText('Parallel translation','Dịch song song');
+ $('#live-translation-mode').options[0].textContent=uiText('Off','Tắt dịch');
+ $('#live-translation-retry').textContent=uiText('Retry','Thử lại');
+ for(const turn of turns.values())render({...turn,_force:true});
+}
+async function configureTranslation(){
+ updateBilingualLayout();if(!savedId||configuringTranslation)return;
+ configuringTranslation=true;$('#live-translation-mode').disabled=true;$('#live-translation-status').textContent=uiText('Connecting translator…','Đang kết nối bộ dịch…');
+ try{
+  const response=await fetch(`/api/recordings/${savedId}/live-translation`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({direction:$('#live-translation-mode').value})});
+  const data=await response.json();if(!response.ok)throw Error(data.detail||'Translation unavailable');
+  await refreshMeeting();
+ }catch(e){$('#live-translation-status').textContent=e.message;$('#live-translation-retry').hidden=false;}
+ finally{configuringTranslation=false;$('#live-translation-mode').disabled=false;}
+}
+$('#live-translation-mode').onchange=()=>{
+ liveTranslations.clear();
+ if(!active&&bilingualMode())$('#live-language').value=$('#live-translation-mode').value.split('-')[0];
+ configureTranslation();
+};
+$('#live-translation-retry').onclick=configureTranslation;
 let paintPending=false;
 let gpuTiming=null;
 function syncSources(){
@@ -20,10 +49,17 @@ function syncSources(){
 }
 $('#source-mode').onchange=syncSources;syncSources();
 function render(turn){
- const old=turns.get(turn.id);if(!turn.deleted&&old&&old.text===turn.text&&old.committed===turn.committed&&old.end===turn.end&&JSON.stringify(old.speaker_spans)===JSON.stringify(turn.speaker_spans)&&old.speaker===turn.speaker)return;
+ const translated=liveTranslations.get(turn.id);
+ turn={...turn,_translationText:bilingualMode()&&translated?.source_text===turn.text?translated.text:null};
+ const old=turns.get(turn.id);if(!turn._force&&!turn.deleted&&old&&old._translationText===turn._translationText&&old.text===turn.text&&old.committed===turn.committed&&old.end===turn.end&&JSON.stringify(old.speaker_spans)===JSON.stringify(turn.speaker_spans)&&old.speaker===turn.speaker)return;
  if(turn.deleted)turns.delete(turn.id);else turns.set(turn.id,turn);if(paintPending)return;paintPending=true;
  requestAnimationFrame(()=>{paintPending=false;const container=$('#turns');const bottom=container.scrollHeight-container.scrollTop-container.clientHeight<40;
- container.replaceChildren(...[...turns.values()].flatMap(t=>t.speaker_spans?.length?t.speaker_spans.map((span,index)=>({...t,...span,id:t.id+':'+index})):t).sort((a,b)=>a.start-b.start).map(t=>{const el=document.createElement('div');el.className='live-turn'+(t.committed?'':' pending');const label=document.createElement('small');label.textContent=`${Math.floor(t.start/60)}:${String(Math.floor(t.start%60)).padStart(2,'0')} · ${t.speaker?.includes('_speaker_') ? (meeting?.speakers?.[t.speaker] || uiText('Speaker ','Người nói ')+t.speaker.split('_').slice(-1)[0]) : t.speaker==null ? uiText('Unassigned','Chưa xác định') : t.source_channel===0?uiText('Room microphone','Mic trong phòng'):t.source_channel===1?uiText('Meeting audio','Âm thanh cuộc họp'):meeting?.speakers?.[t.speaker]||'Unassigned'} · ${t.committed?uiText('Saved draft','Bản nháp đã lưu'):uiText('Draft · revising','Chữ tạm · đang cập nhật')}`;const p=document.createElement('p');p.textContent=t.text;el.append(label,p);return el;}));if(bottom)container.scrollTop=container.scrollHeight;
+ container.replaceChildren(...[...turns.values()].sort((a,b)=>a.start-b.start).map(t=>{const el=document.createElement('div');el.className='live-turn'+(t.committed?'':' pending');const label=document.createElement('small');label.textContent=`${Math.floor(t.start/60)}:${String(Math.floor(t.start%60)).padStart(2,'0')} · ${t.source_channel===0?uiText('Room microphone','Mic trong phòng'):t.source_channel===1?uiText('Meeting audio','Âm thanh cuộc họp'):uiText('Transcript','Transcript')} · ${t.committed?uiText('Saved draft','Bản nháp đã lưu'):uiText('Draft · revising','Chữ tạm · đang cập nhật')}`;const p=document.createElement('p');p.textContent=t.text;const original=document.createElement('div');original.className='live-original';original.append(label,p);el.append(original);
+ if(bilingualMode()){const translation=document.createElement('div');translation.className='live-translated';translation.lang=$('#live-translation-mode').value.split('-')[1];
+ const row=liveTranslations.get(t.id);const valid=row?.source_text===t.text;
+ const heading=document.createElement('small');heading.textContent=(translation.lang==='vi'?'Tiếng Việt':'English')+(row?.draft?uiText(' · Draft',' · Bản dịch nháp'):'');
+ const text=document.createElement('p');text.textContent=valid?row.text:t.committed?uiText('Waiting for translation…','Đang chờ bản dịch…'):uiText('Translating draft…','Đang dịch lời nói…');
+ translation.classList.toggle('translation-pending',!valid);translation.append(heading,text);el.append(translation);}return el;}));if(bottom)container.scrollTop=container.scrollHeight;
  });
 }
 async function stop(){if(!active||stopping)return;stopping=true;$('#stop').disabled=true;$('#state').textContent='Saving received audio and transcript…';if(worklet)worklet.port.postMessage('stop');else if(socket?.readyState===1)socket.send(JSON.stringify({type:'stop'}));}
@@ -50,7 +86,8 @@ $('#start').onclick=async()=>{
       if(message.type==='loading')$('#state').textContent='Đang chuẩn bị nhận diện…';
       if(message.type==='notice')$('#state').textContent=message.message;
       if(message.type==='ready'){
-        if(message.caption_mode==='revisable')$('#timing').textContent=uiText('Live captions can revise; mic/tab labels are audio sources.',message.speaker_mode==='delayed_acoustic'?'Chữ hiện trước; nhãn giọng sẽ cập nhật sau khi đủ ngữ cảnh.':'Chữ tạm sẽ cập nhật; worker chưa hỗ trợ nhãn giọng nền.');
+        setTimeout(()=>{if(bilingualMode())configureTranslation();},0);
+        if(message.caption_mode==='revisable')$('#timing').textContent=uiText('Live captions can revise; mic/tab are audio sources. Review speakers in Recordings.','Chữ tạm sẽ cập nhật; mic/tab là nguồn âm thanh. Phân nhãn người nói trong Bản ghi.');
         savedId=message.id;rememberMeeting();sessionStorage.setItem('voxmeet-live-id',savedId);sessionStorage.removeItem('voxmeet-live-new');sent=ack=message.frames||0;
         if(stopping){socket.send(JSON.stringify({type:'stop'}));return;}
         if(!streams.some(s=>s.getAudioTracks().some(t=>t.readyState==='live'))){stop();return;}
@@ -101,7 +138,7 @@ async function refreshLiveReady(){
  const gpu=$('#live-provider').value==='kaggle';
  const ready=gpu?s.gpu_ready:s.ready&&$('#live-language').value==='en';
  $('#start').disabled=!ready;
- $('#state').textContent=ready?(gpu&&!s.speaker_refinement_ready?uiText('Captions ready · speaker model warming up','Chữ đã sẵn sàng · model giọng đang chuẩn bị'):'Sẵn sàng'):gpu?uiText('Worker is not responding. Check the existing Kaggle session.','Worker mất phản hồi. Kiểm tra phiên Kaggle đang dùng.'):'CPU cũ chỉ hỗ trợ English; tiếng Việt cần Kaggle.';
+ $('#state').textContent=ready?uiText('Ready','Sẵn sàng'):gpu&&s.gpu_state==='warming'?uiText('Preparing speech and chat models on Kaggle…','Đang chuẩn bị model nhận dạng và chat trên Kaggle…'):gpu&&s.gpu_state==='error'?uiText('Model preparation failed. Check Kaggle output.','Chuẩn bị model thất bại. Kiểm tra output Kaggle.'):gpu?uiText('Worker is not responding. Check the existing Kaggle session.','Worker mất phản hồi. Kiểm tra phiên Kaggle đang dùng.'):'CPU cũ chỉ hỗ trợ English; tiếng Việt cần Kaggle.';
 }
 $('#live-provider').onchange=()=>refreshLiveReady().catch(e=>fail(e.message));
 $('#live-language').onchange=()=>refreshLiveReady().catch(e=>fail(e.message));
@@ -141,7 +178,7 @@ $('#saved').onclick=e=>{e.preventDefault();if(savedId)showRecordings('/#recordin
 addEventListener('message',e=>{if(e.origin===location.origin&&e.source===$('#recordings-frame').contentWindow&&e.data?.type==='voxmeet-show-live')showLive();});
 $('#new-meeting').onclick=()=>{
   if(active||socket?.readyState===1)return;
-  savedId=null;meeting=null;gpuTiming=null;turns.clear();assistantKey='';sessionStorage.removeItem('voxmeet-live-id');sessionStorage.setItem('voxmeet-live-new','1');history.replaceState(null,'','/live');
+  savedId=null;meeting=null;gpuTiming=null;liveTranslations.clear();$('#live-translation-status').textContent='';turns.clear();assistantKey='';sessionStorage.removeItem('voxmeet-live-id');sessionStorage.setItem('voxmeet-live-new','1');history.replaceState(null,'','/live');
   for(const id of ['turns','live-chat','live-summary','summary-history'])$('#'+id).replaceChildren();
   $('#delete-live').hidden=true;$('#saved').hidden=true;$('#session-name').textContent='New meeting — ready to start';$('#start').textContent='Start meeting';
   $('#live-ask').disabled=$('#live-summarize').disabled=true;$('#state').textContent='Previous meetings remain in Recordings.';
@@ -163,8 +200,8 @@ async function loadSavedMeetings(){
  } catch (error) { fail(error.message); }
 }
 function paragraph(text){const p=document.createElement('p');p.textContent=text;return p;}
-function sources(ids){const details=document.createElement('details');const title=document.createElement('summary');title.textContent='Supporting transcript';details.append(title);
-  for(const id of ids){const s=meeting.segments.find(s=>s.id===id);if(s)details.append(paragraph(`[${clock(s.start)}] ${s.text}`));else details.append(paragraph('Source unavailable in the current transcript. Generate a new answer.'));}return details;}
+function sources(ids){const details=document.createElement('details');const title=document.createElement('summary');title.textContent=uiText('Supporting transcript','Dẫn chứng');details.append(title);
+  for(const id of ids){const s=meeting.segments.find(s=>s.id===id);if(s)details.append(paragraph(`[${clock(s.start)}] ${s.text}`));else details.append(paragraph(uiText('Source unavailable in the current transcript. Generate a new answer.','Không tìm thấy dẫn chứng trong transcript hiện tại. Hãy hỏi lại.')));}return details;}
 function summaryView(summary){
   const box = renderSummary(summary, sources);
   box.prepend(paragraph(uiText('Based on transcript through ','Dựa trên transcript đến ')+clock(summary.through_seconds)));
@@ -175,21 +212,34 @@ async function refreshMeeting(){
   try{
     const r=await fetch('/api/recordings/'+requested);if(!r.ok)throw Error('Could not restore this meeting. Saved recordings were not deleted.');
     const data=await r.json();if(savedId!==requested)return;meeting=data;$('#delete-live').hidden=false;$('#delete-live').disabled=active||data.qa_status==='processing'||data.summary_status==='processing';$('#session-name').textContent=data.title;
+    const translationState=data.live_translation;
+    liveTranslations=new Map((translationState&&translationState.source_language+'-'+translationState.target_language===$('#live-translation-mode').value?translationState.segments||[]:[]).map(row=>[row.id,row]));
+    if(translationState?.enabled&&translationState.source_language+'-'+translationState.target_language===$('#live-translation-mode').value){
+      for(const row of data.live_translation_previews||[])liveTranslations.set(row.id,row);
+    }
+    for(const turn of turns.values())if(!turn.committed)render({...turn});
+    if(translationState&&!configuringTranslation){
+      const direction=translationState.enabled?translationState.source_language+'-'+translationState.target_language:'off';
+      if($('#live-translation-mode').value!==direction){$('#live-translation-mode').value=direction;updateBilingualLayout();}
+    }
+    const statuses={waiting:uiText('Waiting for text','Chờ lời nói'),listening:uiText('Listening · translation up to date','Đang nghe · đã dịch các câu hiện có'),translating:uiText('Translating on Kaggle…','Đang dịch trên Kaggle…'),ready:uiText('Bilingual transcript saved','Đã lưu transcript song ngữ'),off:''};
+    $('#live-translation-status').textContent=translationState?.error||statuses[translationState?.status]||'';
+    $('#live-translation-retry').hidden=translationState?.status!=='error';
     if(!active)turns.clear();
     for(const turn of data.segments||[])render({...turn,committed:true});
     const end=Math.max(0,...(data.segments||[]).map(s=>s.end));
-    $('#assistant-coverage').textContent=uiText('Transcript through','Transcript đến')+' '+clock(end);
+    $('#assistant-coverage').textContent=uiText('Settled transcript through','Transcript đã chốt đến')+' '+clock(end);
     const busy=submittingQuestion||data.qa_status==='processing'||data.summary_status==='processing';
     $('#live-ask').disabled=$('#live-summarize').disabled=!data.segments?.length||busy;
-    $('#summary-state').textContent=data.summary_status==='processing'?'Summarizing snapshot…':data.summary_error||'';
-    $('#question-state').textContent=data.qa_status==='processing'?uiText('Answering (','Đang trả lời (')+Math.max(0,Math.floor(Date.now()/1000-(data.qa_started_at||Date.now()/1000)))+'s): '+(data.qa_pending||''):data.qa_error||'';
+    $('#summary-state').textContent=data.summary_status==='processing'?uiText('Summarizing through ','Đang tóm tắt đến ')+clock(data.summary_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.summary_started_at||Date.now()/1000)))+'s':data.summary_error||'';
+    $('#question-state').textContent=data.qa_status==='processing'?uiText('Answering through ','Đang trả lời đến ')+clock(data.qa_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.qa_started_at||Date.now()/1000)))+'s: '+(data.qa_pending||''):data.qa_error||'';
     const key=JSON.stringify([data.qa,data.summary,data.summary_history,data.qa_pending,data.qa_status,data.qa_error]);
     if(key!==assistantKey && !submittingQuestion){assistantKey=key;$('#live-chat').replaceChildren();
       for(const q of data.qa||[]){const block=document.createElement('article');block.append(paragraph(uiText('You: ','Bạn: ')+q.question));
         if(q.answerable)for(const point of q.points)block.append(paragraph(point.text),sources(point.evidence.map(e=>e.id)));
-        else block.append(paragraph('Not enough transcript evidence to answer confidently.'));
+        else block.append(paragraph(uiText('Not enough transcript evidence to answer confidently.','Transcript hiện tại chưa đủ thông tin để trả lời chắc chắn.')));
         block.append(paragraph(uiText('Transcript through ','Transcript đến ')+clock(q.through_seconds)));$('#live-chat').append(block);}
-      if(data.qa_pending && ['processing','error'].includes(data.qa_status)) showPendingQuestion(data.qa_pending, data.qa_error || 'Waiting for GPU response…');
+      if(data.qa_pending && ['processing','error'].includes(data.qa_status)) showPendingQuestion(data.qa_pending, data.qa_error || uiText('Waiting for GPU response…','Đang chờ GPU trả lời…'));
       $('#live-summary').replaceChildren(...(data.summary?[summaryView(data.summary)]:[]));
       $('#summary-history').replaceChildren(...(data.summary_history||[]).filter(s=>s.revision===data.revision).slice(0,-1).map(summaryView));
     }
@@ -232,7 +282,16 @@ async function restoreSession(){
   if(savedId){rememberMeeting();await refreshMeeting();if(meeting){$('#live-provider').value=meeting.provider==='live-kaggle'?'kaggle':'local';$('#live-language').value=meeting.language||'en';await refreshLiveReady();}$('#start').textContent='Resume meeting';$('#saved').hidden=false;$('#saved').href='/#recording='+savedId;}
 }
 restoreSession().then(loadSavedMeetings).catch(error=>fail(error.message));
-setInterval(()=>{if(savedId)refreshMeeting();},2000);
+// Faster refresh while translations drain, including after recording stops.
+let lastMeetingPoll=0;
+setInterval(()=>{
+  const state=meeting?.live_translation;
+  const translating=state?.enabled&&!['ready','error','off'].includes(state.status);
+  const now=Date.now();
+  if(savedId&&now-lastMeetingPoll>=(translating?250:1000)){
+    lastMeetingPoll=now;refreshMeeting();
+  }
+},250);
 
 async function applyRecordingChange(change){
  if(change.id===savedId){

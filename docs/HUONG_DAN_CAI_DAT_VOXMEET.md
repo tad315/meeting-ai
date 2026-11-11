@@ -1,7 +1,8 @@
 # HƯỚNG DẪN CÀI ĐẶT VÀ KHỞI CHẠY VOXMEET
 
-**Ngày cập nhật:** 09/11/2026  
-**Phạm vi:** bản demo web Windows + worker Kaggle GPU, mã worker `audio-reference-v2.2`.  
+
+**Ngày cập nhật:** 10/11/2026  
+**Phạm vi:** bản demo web Windows + worker Kaggle GPU, mã worker `live-assistant-v2.3`.  
 **Thư mục chạy trên máy hiện tại:** `E:\VoxMeet\meeting-ai`.
 
 ## 1. Chạy lại nhanh trên máy đã cài
@@ -206,18 +207,16 @@ Các dòng cần thấy ở bản này:
 ```text
 Checking NumPy, pyannote and GPU before accepting jobs...
 Preflight OK: 2.2.6 | Tesla T4
-Speaker engine: audio-reference-v2.2 (batched audio windows + shared Live/Record boundaries)
-Warming up multilingual live ASR...
-Worker running. Choose Community-1 in your local demo. Stop this cell to disconnect.
+VoxMeet v2.5: preload Vietnamese ASR and chat before accepting jobs
+Preparing Vietnamese live ASR on GPU 0 (downloads only if not cached)...
+Preparing Qwen3-4B chat on GPU 1. Please wait before starting the meeting...
+Chat ready: Qwen3-4B is loaded and warmed on GPU 1.
+Worker running. ASR ready; chat ready. Stop this cell to disconnect.
 ```
 
-Với hai GPU, đợi thêm dòng:
+Live chỉ dùng nhãn nguồn mic/tab. Không cần đợi thông báo model phân nhãn Live; phân nhãn người nói được thực hiện trong Record. Với hai GPU, trợ lý có thể chạy nền để luồng nhận ASR tiếp tục.
 
-```text
-Speaker refinement ready on GPU 1 (...s warm-up).
-```
-
-Giữ cell worker chạy trong lúc dùng Record, Live hoặc trợ lý Kaggle. Tải model lần đầu có thể mất thời gian. Quota và thời lượng phiên phụ thuộc tài khoản Kaggle.
+Giữ cell worker chạy trong lúc dùng Record, Live hoặc trợ lý Kaggle. Chờ chuẩn bị model ở đầu phiên, không phải gửi một câu hỏi để kích hoạt tải. Giao diện chỉ báo sẵn sàng sau khi chuẩn bị xong. Tải model lần đầu có thể mất thời gian. Quota và thời lượng phiên phụ thuộc tài khoản Kaggle.
 
 ### 5.4. Kiểm tra kết nối từ Windows
 
@@ -226,10 +225,13 @@ Invoke-RestMethod http://127.0.0.1:8009/api/community-worker
 ```
 
 - `configured=True`: đã có cấu hình phiên.
-- `connected=True`: worker có heartbeat gần đây.
-- `features` có `live_refine`: worker đã quảng bá khả năng cập nhật nhãn Live.
+- `connected=True`: worker có heartbeat gần đây, kể cả lúc đang chuẩn bị model.
+- `startup_state=warming`: đang tải/nạp model, chưa nhận tác vụ; `ready`: đã khởi động xong.
+- `assistant_ready=True`: model chat đã được nạp và chạy thử (chế độ hai GPU).
+- Worker cũ không báo trạng thái nạp model sẽ có `assistant_state=unknown`; không coi là đã nạp sẵn.
+- `features` có `live_asr` và `llm`: worker hỗ trợ nhận chữ Live và trợ lý. Live không yêu cầu `live_refine`.
 
-**Connected không chứng minh đúng bản code.** Luôn kiểm tra dòng `Speaker engine: ...v2.2` trong output Kaggle; notebook vừa tải không tự cập nhật cell đang chạy trong notebook cũ.
+**Connected không chứng minh đúng bản code.** Luôn kiểm tra dòng `VoxMeet v2.5` trong output Kaggle; notebook vừa tải không tự cập nhật cell đang chạy trong notebook cũ.
 
 ## 6. Thử chức năng Record
 
@@ -250,13 +252,15 @@ Không chọn bắt buộc `vi` cho một bài hoàn toàn tiếng Anh. Trong l�
 - Chọn nhà cung cấp **Kaggle GPU** để dùng trợ lý trên worker.
 - Chọn ngôn ngữ đầu ra tóm tắt riêng với ngôn ngữ audio.
 - Dùng khung chat cho các câu hỏi liên tiếp về bản ghi.
+- Chat phân biệt câu hỏi dữ kiện, nguyên nhân, suy luận và kiểm tra một kết luận. Suy luận phải dựa trên nội dung đã có; câu hỏi về kết luận mạnh có thêm bước kiểm tra dẫn chứng có đủ hỗ trợ kết luận hay không. Không suy tính cách/động cơ từ một lỗi kỹ năng.
+- Một câu trả lời có ID nguồn hợp lệ vẫn có thể suy luận sai. Cần nghe đối chiếu các kết luận quan trọng; kiểm tra nguồn không thay thế đánh giá ý nghĩa.
 - Dịch Record được lưu riêng; kiểm tra bản gốc và bản dịch khi sử dụng.
-- Lần gọi trợ lý đầu tiên có thể phải tải Qwen3-4B.
+- Với worker v2.5 và hai GPU, Qwen3-4B được tải/nạp và chạy thử ngay khi khởi động. Chờ `Chat ready` trước khi bắt đầu; câu hỏi dùng lại model đã nạp. Cache mới có thể cần tải khoảng 8 GB trọng số trên Kaggle. Một GPU vẫn dùng chế độ tuần tự/nạp khi cần và hiển thị cảnh báo riêng.
 - Sửa transcript có thể làm kết quả trợ lý trước đó hết phù hợp hoặc bị xóa/đánh dấu cũ theo luồng ứng dụng; xuất nội dung cần giữ trước khi nhận dạng lại.
 
 ## 7. Thử chức năng Live
 
-1. Đợi worker báo `Speaker refinement ready` rồi mở **Họp trực tiếp / Live meeting**.
+1. Đợi worker báo đang chạy rồi mở **Họp trực tiếp / Live meeting**.
 2. Chọn nguồn âm thanh đúng với bài thử:
    - Video/Meet trong trình duyệt: chọn **audio tab cuộc họp**.
    - Nói trực tiếp trong phòng: chọn **mic trong phòng**.
@@ -269,7 +273,7 @@ Không chọn bắt buộc `vi` cho một bài hoàn toàn tiếng Anh. Trong l�
 
 Máy có thể ghi được tín hiệu nhưng nguồn chọn sai vẫn khiến model nghe sai nội dung. Mặc định nên thử từng nguồn riêng trước khi phối hợp.
 
-Live dùng chữ tạm có thể sửa trong lúc cập nhật; nhãn giọng chạy nền. Bản v2.2 gửi tác vụ nhãn sau khoảng 4 giây dữ liệu tích lũy thay vì 12 giây trước đó. **Đây không phải độ trễ hiển thị 4 giây hay cam kết 0,5–1 giây**: còn thời gian chốt lời, hàng đợi, mạng và GPU.
+Live dùng chữ tạm có thể sửa trong lúc cập nhật và chỉ hiển thị nguồn mic/tab. Bản v2.3 không gửi tác vụ phân nhãn trong Live, không chờ phân nhãn khi dừng. Tóm tắt/chat dùng transcript đã chốt và hiển thị mốc thời gian của snapshot. Khi cần phân biệt từng người, mở audio đã lưu trong Record và chạy Community-1. Độ trễ vẫn phụ thuộc chốt lời, mạng và GPU; chưa cam kết 0,5–1 giây.
 
 ## 8. Cập nhật code và notebook
 
@@ -366,8 +370,8 @@ Không cần tải dataset train từ Drive/Kaggle về máy chỉ để sử d�
 - [ ] `/api/health` trả thành công và nhận được FFmpeg.
 - [ ] Import backend không lỗi thiếu thư viện.
 - [ ] Kaggle bật Internet, GPU; preflight qua.
-- [ ] Kaggle thấy đúng dòng `audio-reference-v2.2`.
-- [ ] Có `Speaker refinement ready` nếu thử nhãn Live.
+- [ ] Kaggle thấy đúng dòng `VoxMeet v2.5`.
+- [ ] Live chỉ hiển thị nguồn mic/tab; phân nhãn người nói thực hiện trong Record.
 - [ ] VoxMeet báo worker connected.
 - [ ] Một audio English ngắn được nhận dạng bằng English và trả kết quả tự động.
 - [ ] Một audio tiếng Việt được nhận dạng bằng cấu hình phù hợp.
@@ -384,7 +388,7 @@ cd E:\VoxMeet\meeting-ai
 
 Bộ test hiện có thể cần các thư viện nhánh local (ví dụ faster-whisper/sherpa-onnx) mà cấu hình Kaggle tối thiểu không cài. Chỉ cài thêm khi chạy kiểm thử/nhánh đó; dùng `requirements-local.txt` nếu cần, không bắt buộc tải model local chỉ để mở web.
 
-Tại thời điểm viết, **137 kiểm thử code đã qua trên môi trường phát triển hiện tại**. Điều này không có nghĩa nhận diện đúng 100% hoặc Live đạt độ trễ 0,5–1 giây. Bản tối ưu v2.2 vẫn cần đo GPU và kiểm thử nhiều audio Việt/Anh, câu ngắn, nói chồng và tiếng cười. Các nhãn đã chỉnh tay không được tính là model tự nhận đúng.
+Tại thời điểm viết, **137 kiểm thử code đã qua trên môi trường phát triển hiện tại**. Điều này không có nghĩa nhận diện đúng 100% hoặc Live đạt độ trễ 0,5–1 giây. Bản v2.5 có thêm 22 kiểm tra tập trung về khởi động, tái sử dụng model, hàng đợi, song song và chính sách ASR đã qua; bước nạp trước trên phiên GPU mới vẫn cần xác nhận thực tế. Bản này vẫn cần đo GPU và kiểm thử nhiều audio Việt/Anh, câu ngắn, nói chồng và tiếng cười. Các nhãn đã chỉnh tay không được tính là model tự nhận đúng.
 
 ## 13. Tài liệu tham khảo
 

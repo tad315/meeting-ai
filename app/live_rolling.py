@@ -13,7 +13,7 @@ import numpy as np
 from . import store, remote_tasks
 from .live import AudioWriter, RATE, MAX_SECONDS
 from .live_gpu import validated_turns, wav_bytes
-from .live_word_turns import sentence_turns, label_turn, validate_tracks
+from .live_word_turns import sentence_turns
 
 
 def endpoint(samples, rate=RATE):
@@ -51,8 +51,6 @@ async def capture(ws,config):
     language=config.get('language','vi')
     if language not in ('vi','en','auto'):raise ValueError('Ngôn ngữ không hợp lệ.')
     remote_tasks.require_worker('live_asr')
-    from . import community_queue
-    refinement_enabled={'live_refine','shared_turns'}.issubset(community_queue.status().get('features',[])) 
     resume=config.get('resume_id')
     if resume:
         item=store.get(resume) if isinstance(resume,str) else None
@@ -70,7 +68,7 @@ async def capture(ws,config):
     frames=round(item.get('duration',0)*RATE) if resume else 0
     if frames>=RATE*MAX_SECONDS:raise ValueError('Phiên đã đạt giới hạn 30 phút.')
     item.update(audio=str(folder/'audio.wav'),live_sources=str(folder/'live-sources.wav'),status='recording',
-        live_caption_mode='revisable',live_speaker_mode='delayed_acoustic' if refinement_enabled else 'source_only')
+        live_caption_mode='revisable',live_speaker_mode='source_only',live_refinement_status='disabled')
     store.save(item)
     mono=AudioWriter(folder/'audio.wav',1,bool(resume))
     stereo=AudioWriter(folder/'live-sources.wav',2,bool(resume))
@@ -85,13 +83,11 @@ async def capture(ws,config):
     errors=[]
     last_schedule=frames
     last_persist=time.monotonic()
-    last_capability_check=0
-    refine_wake=asyncio.Event()
-    refinement_finishing=False
-    refined=[frames,frames]
-    session_start=frames
 
     async def send(message):
+        if message.get('type')=='update':
+            from . import live_translation
+            live_translation.observe(item['id'],message.get('turns',[]),message.get('remove_turns',[]))
         try:await ws.send_json(message)
         except Exception:pass
 
@@ -110,58 +106,10 @@ async def capture(ws,config):
             turns.extend(sentences);persist()
             await send(dict(type='update',turns=[dict(t,committed=True) for t in sentences],
                 remove_turns=[pending[channel]['id']],frames=frames,processing_ms=0))
-            refine_wake.set()
         cursors[channel]=end
         submitted[channel]=end
         pending[channel]=None
         identities[channel]=uuid.uuid4().hex
-
-    async def refine():
-        while True:
-            await refine_wake.wait();refine_wake.clear()
-            for channel in range(2):
-                if not enabled[channel]:continue
-                settled=[t for t in turns if t.get('source_channel')==channel and t.get('words')]
-                latest=round(max((t['end'] for t in settled),default=session_start/RATE)*RATE)
-                if latest-refined[channel]<4*RATE and not refinement_finishing:continue
-                through=min(latest,refined[channel]+4*RATE)
-                if through<=refined[channel] or through-session_start<3*RATE:continue
-                start=max(session_start,through-20*RATE)
-                try:
-                    data=read(channel,start,through)
-                    # Relative word timestamps let the worker reuse the same sentence engine.
-                    units=[dict(id=t['id'],words=[dict(w,start=w['start']-start/RATE,end=w['end']-start/RATE) for w in t['words']])
-                        for t in settled if t['start']>=start/RATE and t['end']<=through/RATE]
-                    job=await asyncio.to_thread(remote_tasks.enqueue,
-                        dict(kind='live_refine',session=item['id']+'_'+str(channel),offset=start/RATE,units=units),wav_bytes(data))
-                    result=await remote_tasks.wait(job,timeout=180,poll_interval=.2)
-                    tracks=validate_tracks(result,len(data)/RATE)
-                    changed=[];speakers=dict(store.get(item['id']).get('speakers',{}))
-                    for index,turn in enumerate(turns):
-                        updated=label_turn(turn,tracks,start/RATE,len(data)/RATE,channel)
-                        if updated!=turn:
-                            turns[index]=updated;changed.append(dict(updated,committed=True))
-                            labels=[updated.get('speaker')]+[span.get('speaker') for span in updated.get('speaker_spans',[])]
-                            for label in labels:
-                                if label and label.startswith(str(channel)+'_speaker_'):
-                                    speakers[label]='Người nói '+str(channel+1)+'.'+label.split('_')[-1]
-                    store.patch(item['id'],speakers=speakers,live_refinement_status='ready' if any(t['speaker'] for t in tracks) else 'uncertain',
-                        live_refinement_timing=result.get('timing'),live_refinement_through=through/RATE)
-                    persist()
-                    if changed:await send(dict(type='update',turns=changed,speakers=speakers,frames=frames,processing_ms=0))
-                    refined[channel]=through
-                except Exception:
-                    # Never interrupt captions or erase their original text.
-                    store.patch(item['id'],live_refinement_status='error')
-                    await send(dict(type='notice',message='Nhãn giọng chưa cập nhật được; chữ và audio vẫn được giữ.'))
-                    refined[channel]=through
-            if refinement_finishing:
-                latest=[round(max((t['end'] for t in turns if t.get('source_channel')==c),default=session_start/RATE)*RATE) for c in range(2)]
-                if any(enabled[c] and latest[c]>refined[c] for c in range(2)):
-                    refine_wake.set()
-                else:return
-            elif any(enabled[c] and round(max((t['end'] for t in turns if t.get('source_channel')==c),default=session_start/RATE)*RATE)-refined[c]>=4*RATE for c in range(2)):
-                refine_wake.set()
 
     async def consume():
         while True:
@@ -200,10 +148,10 @@ async def capture(ws,config):
                     submitted[channel]=end
                     remote=time.monotonic()-began
                     model=result.get('asr_model')
-                    if model not in ('small','turbo'):model=None
+                    if model not in ('small','turbo','large-v3'):model=None
                     lag=max(0,frames/RATE-turn['end']) if turn else 0
                     store.patch(item['id'],live_asr_model=model,live_remote_seconds=round(remote,2),
-                        live_latency_seconds=round(lag,2),live_queue_depth=0)
+                        live_latency_seconds=round(lag,2),live_queue_depth=0,live_asr_quality=result.get('quality',[]),live_inference_seconds=result.get('inference_seconds'))
                     await send(dict(type='update',turns=[dict(turn,committed=False)] if turn else [],
                         remove_turns=[] if turn else [identities[channel]],frames=frames,
                         processing_ms=round(remote*1000),timing=dict(asr_model=model,
@@ -223,10 +171,9 @@ async def capture(ws,config):
                 wake.set()
 
     consumer=asyncio.create_task(consume())
-    refinement=asyncio.create_task(refine()) if refinement_enabled else None
     try:
         await send(dict(type='ready',id=item['id'],frames=frames,caption_mode='revisable',
-            speaker_mode='delayed_acoustic' if refinement_enabled else 'source_only'))
+            speaker_mode='source_only'))
         while True:
             message=await asyncio.wait_for(ws.receive(),30)
             if message['type']=='websocket.disconnect':break
@@ -242,14 +189,6 @@ async def capture(ws,config):
             mix=data.astype(np.int32).sum(axis=1)/max(sum(enabled),1)
             mono.writeframes(np.clip(mix,-32768,32767).astype('<i2').tobytes())
             frames+=len(data)
-            if not refinement_enabled and time.monotonic()-last_capability_check>=2:
-                last_capability_check=time.monotonic()
-                if {'live_refine','shared_turns'}.issubset(community_queue.status().get('features',[])):
-                    refinement_enabled=True
-                    refinement=asyncio.create_task(refine())
-                    store.patch(item['id'],live_speaker_mode='delayed_acoustic')
-                    refine_wake.set()
-                    await send(dict(type='notice',message='Model giọng đã sẵn sàng; đang cập nhật nhãn cho các câu đã lưu.'))
             if frames-last_schedule>=RATE//2:
                 last_schedule=frames;wake.set()
             if time.monotonic()-last_persist>2:
@@ -269,19 +208,8 @@ async def capture(ws,config):
             for channel in range(2):
                 if pending[channel]:
                     turns.extend(sentence_turns(pending[channel]));pending[channel]=None
-            if refinement:
-                refinement_finishing=True
-                refine_wake.set()
-                await send(dict(type='notice',message='Đang hoàn thiện nhãn người nói; chữ đã được lưu.'))
-                try:await asyncio.wait_for(refinement,60)
-                except asyncio.TimeoutError:
-                    store.patch(item['id'],live_refinement_status='incomplete')
-                except Exception:
-                    store.patch(item['id'],live_refinement_status='error')
-                finally:
-                    refinement.cancel();await asyncio.gather(refinement,return_exceptions=True)
             mono.close();stereo.close();persist()
-        warning=('Chữ và nhãn giọng đều là bản nháp cần kiểm tra. Nhãn chưa chắc chắn được để chưa xác định.' if refinement_enabled else 'Chữ trực tiếp là bản nháp; nhãn mic/tab là nguồn âm thanh. Worker hiện tại chưa hỗ trợ cập nhật giọng nền.')
+        warning='Transcript Live là bản nháp. Mic/tab là nguồn âm thanh; phân biệt người nói thực hiện trong Record.'
         if errors:warning+=' Có đoạn chưa nhận diện xong; hãy xử lý lại audio đã lưu.'
         store.patch(item['id'],status='ready',warning=warning,live_transcript_incomplete=bool(errors) or not normal)
         await send(dict(type='saved',id=item['id'],duration=frames/RATE))

@@ -69,7 +69,7 @@ class LiveTransportTests(unittest.TestCase):
         exec(compile(ast.Module(body=[node],type_ignores=[]),'<heartbeat>','exec'),namespace)
         namespace['heartbeat']();self.assertNotIn('live_refine',sent[-1])
         state.set();namespace['stop']=Stop();namespace['heartbeat']();self.assertIn('live_refine',sent[-1])
-    def test_slow_refinement_catches_up_to_final_caption_window(self):
+    def test_live_stop_does_not_wait_for_or_enqueue_speaker_refinement(self):
         jobs=[];received=asyncio.Event()
         class Socket:
             def __init__(self):self.left=100;self.sent=[]
@@ -95,8 +95,10 @@ class LiveTransportTests(unittest.TestCase):
             asyncio.run(live_rolling.capture(socket,dict(sources=[False,True],language='en')))
         saved=next(m for m in socket.sent if m['type']=='saved')
         item=store.get(saved['id'])
-        self.assertGreaterEqual(sum(task['kind']=='live_refine' for task,_ in jobs),3)
-        self.assertAlmostEqual(item['live_refinement_through'],max(t['end'] for t in item['segments']),places=2)
+        self.assertTrue(jobs)
+        self.assertTrue(all(task['kind']=='live_asr' for task,_ in jobs))
+        self.assertEqual(item['live_speaker_mode'],'source_only')
+        self.assertEqual(item['live_refinement_status'],'disabled')
 
 
 if __name__=='__main__':unittest.main()

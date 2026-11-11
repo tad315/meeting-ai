@@ -6,7 +6,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&
 const clock = value => {const n=Math.floor(value||0);return `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;};
 const active = status => ['recording','queued','decoding','transcribing','cancelling'].includes(status);
 const labels = {recording:'Recording live',queued:'Waiting',decoding:'Preparing audio',uploaded:'Ready to transcribe',transcribing:'Transcribing',cancelling:'Cancelling',cancelled:'Cancelled',ready:'Transcript ready',error:'Needs attention',interrupted:'Interrupted'};
-const stages={community_worker:'Community-1 worker is processing your recording…',loading_models:'Loading local speech models…',recognizing_speech:'Recognizing English speech',identifying_speakers:'Identifying speakers',aligning_words:'Matching words to speaker turns…',saving:'Saving your transcript…',requesting_api:'Waiting for the speech API…'};
+const stages={waiting_gpu_connection:uiText('Waiting for the GPU connection; the job is preserved…','Đang chờ GPU kết nối lại; tác vụ vẫn được giữ…'),verifying_speakers:uiText('Reviewing speaker labels…','Đang kiểm tra nhãn người nói…'),returning_result:uiText('Returning transcript…','Đang nhận transcript…'),community_worker:'Community-1 worker is processing your recording…',loading_models:'Loading local speech models…',recognizing_speech:'Recognizing English speech',identifying_speakers:'Identifying speakers',aligning_words:'Matching words to speaker turns…',saving:'Saving your transcript…',requesting_api:'Waiting for the speech API…'};
 const colours=['#e8eed9','#dfecef','#efe5da','#eae2ef','#f1edcf'];
 let recordings=[], current=null, caps=null, uploading=false, polling=false;
 async function api(path, options={}){
@@ -23,9 +23,9 @@ function renderList(){
 async function refreshList(){recordings=await api('/recordings');renderList();}
 function refreshMode(){
   const provider=$('#provider').value;
-  const ready=caps&&(provider==='community'?caps.community_worker?.connected:provider==='local'?caps.local_ready:caps.deepgram_configured);
+  const ready=caps&&(provider==='community'?caps.community_worker?.available_for_jobs:provider==='local'?caps.local_ready:caps.deepgram_configured);
   $('#record-turn-policy').hidden=provider!=='community';document.querySelector('label[for="record-turn-policy"]').hidden=provider!=='community';
-  $('#provider-note').textContent=provider==='community'?'Whisper đa ngôn ngữ + Community-1 (VBx) on your connected Kaggle GPU. Audio is transferred through Cloudflare. Review speaker labels after processing.':provider==='local'?'Legacy CPU mode may split one person into several speakers. Use GPU transcript below for Community-1.':'Audio will be sent to Deepgram to transcribe and separate speakers. Provider charges may apply.';
+  $('#provider-note').textContent=provider==='community'?'Whisper đa ngôn ngữ + Community-1 (VBx) on your selected GPU worker. Audio is transferred through Cloudflare. Review speaker labels after processing.':provider==='local'?'Legacy CPU mode may split one person into several speakers. Use GPU transcript below for Community-1.':'Audio will be sent to Deepgram to transcribe and separate speakers. Provider charges may apply.';
   $('#transcribe').disabled=!current?.has_audio||active(current?.status)||!ready;
   $('#provider').disabled=active(current?.status);$('#audio-language').disabled=active(current?.status);
   $('#speaker-count').disabled=active(current?.status)||provider==='deepgram';
@@ -63,8 +63,8 @@ async function openRecording(id){
 }
 async function refreshCaps(){
   caps=await api('/health');
-  const hasProvider=caps.deepgram_configured||caps.local_ready||caps.community_worker?.connected;
-  $('#community-status').textContent=caps.community_worker?.connected?'Worker online — ready to receive recordings.':'Worker offline — start the notebook worker cell.';
+  const hasProvider=caps.deepgram_configured||caps.local_ready||caps.community_worker?.available_for_jobs;
+  $('#community-status').textContent=caps.community_worker?.startup_state==='warming'?uiText('Preparing speech and chat models on Kaggle…','Kaggle đang tải/nạp model nhận dạng và chat…'):caps.community_worker?.available_for_jobs?uiText('Kaggle is online.','Kaggle đang online.'):uiText('Worker is not ready — check the Kaggle cell.','Worker chưa sẵn sàng — kiểm tra cell Kaggle.');
   $('#community-notebook').hidden=!caps.community_worker?.configured;
   $('#readiness').hidden=hasProvider&&caps.ffmpeg_available;
   $('#readiness-text').textContent=!caps.ffmpeg_available?'The audio decoder needs setup before uploading.':'You can upload and play audio now. Configure local models or an API key to create speaker-labelled transcripts.';
@@ -122,7 +122,7 @@ function renderSummary(){
   const busy=current.summary_status==='processing';
   $('#summarize').disabled=busy||active(current.status)||!current.segments?.length;
   $('#summary-provider').disabled=busy;
-  $('#summary-note').textContent=$('#summary-provider').value==='kaggle' ? 'Tóm tắt bằng GPU Kaggle. Transcript được gửi tới worker; không dùng CPU máy này.' : $('#summary-provider').value==='api'
+  $('#summary-note').textContent=$('#summary-provider').value==='kaggle' ? 'Tóm tắt bằng GPU đang chọn. Transcript được gửi tới worker; không dùng CPU máy này.' : $('#summary-provider').value==='api'
     ?'Transcript text will be sent to your configured API provider. Charges may apply.'
     :`Uses Ollama (${caps?.ollama_model||'configured model'}) on this computer. Start Ollama first; CPU processing may take several minutes.`;
   $('#summary-status').textContent=busy?'Creating a draft from the current transcript…':current.summary_error||'';
@@ -266,7 +266,7 @@ function renderQA(){
     chatRecording=current.id;
     $('#qa-question').value=chatDrafts.get(current.id)||'';
   }
-  $('#qa-note').textContent=$('#qa-provider').value==='kaggle' ? 'Hỏi đáp bằng GPU Kaggle, có dẫn chứng từ transcript.' : $('#qa-provider').value==='api'
+  $('#qa-note').textContent=$('#qa-provider').value==='kaggle' ? 'Hỏi đáp bằng GPU đang chọn, có dẫn chứng từ transcript.' : $('#qa-provider').value==='api'
     ?'Recent chat and transcript excerpts are sent to your configured API provider.'
     :'Chat is saved for this recording. Recent questions help with follow-ups; answers are checked against the transcript. Editing the transcript clears this chat. Local CPU replies may take a few minutes.';
   $('#qa-status').textContent=current.qa_status==='error'?current.qa_error||'Reply failed. Please retry.':'';
@@ -382,8 +382,8 @@ function renderTranslation(){
   if(target)$('#translation-language').value=target;
   const progress=current.translation_progress;
   $('#translation-status').textContent=busy
-    ?uiText('Translating on Kaggle GPU','Đang dịch bằng GPU Kaggle')+(progress?` · ${progress.done}/${progress.total}`:'…')
-    :current.translation_error||(!fresh&&current.translation?uiText('Transcript changed. Translate again.','Transcript đã thay đổi. Hãy dịch lại.'):'');
+    ?uiText('Translating on the selected GPU','Đang dịch bằng GPU đang chọn')+(progress?` · ${progress.done}/${progress.total}`:'…')
+    :current.translation_error||(fresh?.partial?uiText('Partial translation saved. Translate again to finish.','Đã lưu bản dịch một phần. Dịch lại để hoàn tất.'):null)||(!fresh&&current.translation?uiText('Transcript changed. Translate again.','Transcript đã thay đổi. Hãy dịch lại.'):'');
   const link=$('#translation-export');link.hidden=!fresh;
   link.textContent=uiText('Export bilingual .txt','Xuất song ngữ .txt');
   link.href=`/api/recordings/${current.id}/translation/export`;

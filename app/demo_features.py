@@ -1,3 +1,4 @@
+from . import assistant_cache
 """Draft summaries and validated Colab transcript import for the upload demo."""
 import json
 import math
@@ -91,15 +92,27 @@ def decode_summary_json(text):
 
 
 async def draft_summary(item, provider):
-    batches, batch, size = [], [], 0
-    for segment in item['segments']:
-        if batch and size + len(segment['text']) > 6500:
-            batches.append(batch)
-            batch, size = [], 0
-        batch.append(segment)
-        size += len(segment['text']) + 100
-    if batch:
-        batches.append(batch)
+    original_segments=item['segments']
+    source_vi=item.get('language')=='vi' or any(any(c in s['text'].casefold() for c in 'ăâđêôơư') for s in original_segments)
+    batch_budget=5000 if source_vi else 6500
+    overview_budget=6500 if source_vi else 11000
+    batches,batch,size=[],[],0
+    # Bound even a single unusually long ASR turn. Fragments retain the real
+    # source ID and original time range; no artificial speaker/timestamp is made.
+    for segment in original_segments:
+        remaining=segment['text']
+        while remaining:
+            cut=min(len(remaining),batch_budget-100)
+            if cut<len(remaining):
+                space=remaining.rfind(' ',0,cut)
+                if space>=cut//2:cut=space
+            text=remaining[:cut].strip();remaining=remaining[cut:].lstrip()
+            if not text:continue
+            part=dict(segment,text=text)
+            if batch and size+len(text)+100>batch_budget:
+                batches.append(batch);batch,size=[],0
+            batch.append(part);size+=len(text)+100
+    if batch:batches.append(batch)
     sections = []
     language_code = item.get('summary_language', item.get('language'))
     if language_code == 'auto':
@@ -141,6 +154,15 @@ async def draft_summary(item, provider):
         'Nếu đoạn chép lời mơ hồ, bỏ chi tiết đó. Kiểm tra các từ phủ định trước khi viết. '
         'Chỉ xuất JSON, để mã dẫn chứng trong ids.'
     )
+    if not debate:
+        vietnamese_rules = (
+            'Toàn bộ trường text phải viết bằng tiếng Việt có dấu. '
+            'Viết từ góc nhìn người quan sát, nêu mục đích thực sự của nội dung. '
+            'Nối các câu liền nhau để hiểu đủ nguyên nhân, hành động và kết quả; không suy đoán người phụ trách. '
+            'Phân biệt đề nghị với quyết định đã được thống nhất. Giữ điều kiện, phủ định và mức độ chắc chắn. '
+            'Không áp dụng nhãn đội ủng hộ/phản đối nếu transcript không phải tranh biện. '
+            'Chỉ xuất JSON, để mã dẫn chứng trong ids.'
+        )
     debate_editorial = (
         'Summarize as a neutral third-person observer. Start with the actual motion, including its condition or policy. '
         'Select the strongest distinct argument each side actually made, regardless of speaking time or number of citations. '
@@ -150,7 +172,7 @@ async def draft_summary(item, provider):
         'Omit ambiguous or repetitive details. Do not recommend a side, declare a winner, or write in either side as the narrator.'
     )
     overview = []
-    compact_live = bool(item.get('live_sources')) and len(batches) == 1
+    compact_live = len(batches) == 1  # One model call for short Record as well as Live.
     for batch in (batches if compact_live else [*batches, None]):
         is_overview = batch is None
         if is_overview:
@@ -161,18 +183,26 @@ async def draft_summary(item, provider):
             # Give the overview direct evidence rather than recycling errors from analysis notes.
             original = item['segments']
             priority = [segment for segment in original if segment['id'] in cited]
-            if sum(len(segment['text']) + 60 for segment in original) <= 12500:
+            if sum(len(segment['text']) + 60 for segment in original) <= overview_budget:
                 batch = original
             else:
                 # Sample across the recording before filling remaining space with cited turns.
                 stride = max(1, len(original) // 12)
-                chosen, remaining = {}, 12500
+                chosen, remaining = {}, overview_budget
                 for segment in [original[0], original[-1], *original[::stride], *priority]:
-                    cost = len(segment['text']) + 60
-                    if segment['id'] not in chosen and cost <= remaining:
-                        chosen[segment['id']] = segment
-                        remaining -= cost
-                batch = [segment for segment in original if segment['id'] in chosen] or priority[:1]
+                    if segment['id'] in chosen or remaining<260:continue
+                    # Do not discard a long source turn or keep only its
+                    # opening. Sample its beginning, middle and end while
+                    # retaining the real source ID for the overview.
+                    allowance=min(1400,remaining-60)
+                    text=segment['text']
+                    if len(text)>allowance:
+                        width=max(1,(allowance-20)//3)
+                        middle=max(0,(len(text)-width)//2)
+                        text=text[:width]+'\n[…]\n'+text[middle:middle+width]+'\n[…]\n'+text[-width:]
+                    chosen[segment['id']]=dict(segment,text=text)
+                    remaining-=len(text)+60
+                batch = [chosen[segment['id']] for segment in original if segment['id'] in chosen] or [dict(original[0],text=original[0]['text'][:overview_budget-100])]
         sources = {s['id']: s for s in batch}
         aliases = {str(i+1): s['id'] for i,s in enumerate(batch)}
         source = '\n'.join(
@@ -222,10 +252,18 @@ async def draft_summary(item, provider):
             source = 'STANCE ANCHORS (context only, never cite):\n' + stance_context + '\n\nEXCERPTS:\n' + source
         prompt += ' For ids, copy the identifiers in square brackets from EXCERPTS, for example [1] becomes "1".'
         if compact_live:
-            prompt += ' For this short live snapshot, write the FIRST bullet as category topic: one concise third-person overview paragraph. Then write 1 to 3 distinct analytical points. Avoid repeating the overview. Do not infer names from nearby questions.'
+            prompt += ' For this short transcript, write the FIRST bullet as category topic: one concise third-person overview paragraph. Then write 1 to 3 distinct analytical points. Avoid repeating the overview. Do not infer names from nearby questions.'
+        if not is_overview and batch and batch[0] is not item['segments'][0]:
+            first_index=next((i for i,s in enumerate(item['segments']) if s['id']==batch[0]['id']),0)
+            before=item['segments'][max(0,first_index-2):first_index]
+            if before:
+                context=' '.join(s['text'] for s in before)[-1600:]
+                source='PRECEDING CONTEXT (context only, never cite): '+context+'\n\nEXCERPTS:\n'+source
         messages = [dict(role='system', content=prompt), dict(role='user', content=source)]
+        cache_key=assistant_cache.key(item.get('id'),provider,dict(kind='summary-part-v1',messages=messages,schema=schema))
+        cached_raw=assistant_cache.get(cache_key)
         for attempt in range(2):
-            raw = await chat(messages,
+            raw = cached_raw if attempt==0 and cached_raw is not None else await chat(messages,
                              provider, schema=schema, keep_alive='5m', max_tokens=700 if compact_live else 1200)
             text = raw.strip()
             if text.startswith('```') and text.endswith('```'):
@@ -264,6 +302,7 @@ async def draft_summary(item, provider):
                     continue
                 stage = 'tổng quan' if is_overview else f'phân tích đoạn {batch[0]["start"]:.0f}s'
                 raise ValueError(f'AI trả về định dạng hoặc dẫn chứng không hợp lệ ở phần {stage} sau hai lần thử.') from exc
+            assistant_cache.put(cache_key,raw)
             break
         clean = []
         for b in bullets:
@@ -305,5 +344,16 @@ async def draft_summary(item, provider):
             overview = clean
         else:
             sections.append(dict(start=batch[0]['start'], end=max(s['end'] for s in batch), bullets=clean))
+    seen={}
+    for section in sections:
+        unique=[]
+        for point in section['bullets']:
+            key=(point['category'],' '.join(point['text'].casefold().split()),point.get('owner'),point.get('deadline'))
+            if key in seen:
+                previous=seen[key]
+                previous['ids']=list(dict.fromkeys(previous['ids']+point['ids']))[:4]
+            else:
+                seen[key]=point;unique.append(point)
+        section['bullets']=unique
     return dict(revision=item['revision'], provider=provider, overview=overview, sections=sections,
                 label='AI draft — verify against the transcript', verified=False)

@@ -25,7 +25,9 @@ from . import gpu_connection
 from . import community_queue
 from .meeting_qa import answer as answer_meeting_question
 from .turn_editing import split_turn, word_boundaries
-from . import recording_translation
+from . import recording_translation, live_translation
+from .gpu_payloads import MAX_GPU_RESULT_BYTES
+from .gpu_jobs import wait_for_record_result
 
 SERVER_SESSION = str(time.time_ns())
 
@@ -47,6 +49,7 @@ async def lifespan(app):
     app.state.gpu_lock = asyncio.Lock()
     yield
     # The authenticated relay persists so notebook URLs survive app restarts.
+    await live_translation.shutdown()
     pending = list(tasks)
     for event in cancel_events.values():
         event.set()
@@ -98,9 +101,23 @@ def public(item):
     # Do not expose server file paths, or future-step data, in this version.
     return {key: item.get(key) for key in ('id', 'title', 'created_at', 'status', 'error',
              'duration', 'segments', 'speakers', 'provider', 'filename', 'warning', 'revision',
-             'stage', 'progress', 'processing_seconds', 'num_speakers', 'language', 'turn_policy', 'summary', 'summary_history', 'summary_error', 'summary_status', 'provenance', 'gpu_session', 'qa', 'qa_status', 'qa_error', 'qa_pending', 'qa_started_at', 'translation', 'translation_status', 'translation_error', 'translation_progress', 'translation_target')} | {
+             'stage', 'progress', 'processing_seconds', 'num_speakers', 'language', 'turn_policy', 'summary', 'summary_history', 'summary_error', 'summary_status', 'summary_started_at', 'summary_pending_through', 'provenance', 'gpu_session', 'qa', 'qa_status', 'qa_error', 'qa_pending', 'qa_started_at', 'qa_pending_through', 'translation', 'translation_status', 'translation_error', 'translation_progress', 'translation_target', 'live_translation')} | {
+                'live_translation_previews': live_translation.previews(item['id']),
                 'has_audio': bool(item.get('audio') and Path(item['audio']).is_file()),
                 'is_live': bool(item.get('live_sources'))}
+
+
+class LiveTranslationRequest(BaseModel):
+    direction: Literal['off','en-vi','vi-en']
+
+
+@app.post('/api/recordings/{mid}/live-translation')
+async def configure_live_translation(mid: str, body: LiveTranslationRequest):
+    item=get(mid)
+    if not item.get('live_sources'):raise HTTPException(400,'Chỉ bật dịch Live cho phiên họp trực tiếp.')
+    if item['status'] not in ('recording','ready','interrupted'):raise HTTPException(409,'Bản ghi đang xử lý.')
+    try:return public(live_translation.configure(item,body.direction))
+    except ValueError as exc:raise HTTPException(400,str(exc))
 
 
 @app.get('/api/health')
@@ -257,16 +274,10 @@ async def run_transcription(mid):
                 folder = community_queue.enqueue(item)
                 try:
                     update(item, status='transcribing', stage='community_worker', progress=None)
-                    while not (folder/'result.json').exists():
-                        if cancel.is_set():
-                            raise ProcessingCancelled()
-                        if (folder/'error.json').exists():
-                            raise ValueError('GPU worker failed. Check the notebook output and retry.')
-                        if not community_queue.status()['connected']:
-                            raise ValueError('GPU worker disconnected. The previous transcript is preserved. Reconnect and retry.')
-                        if time.monotonic() - started > 3600:
-                            raise ValueError('GPU processing timed out. Check the worker before retrying.')
-                        await asyncio.sleep(2)
+                    def gpu_progress(stage,percentage,warning):
+                        update(item,status='transcribing',stage=stage,progress=percentage,
+                            warning=warning,processing_seconds=round(time.monotonic()-started,1))
+                    await wait_for_record_result(folder,cancel,gpu_progress,started=started)
                     if cancel.is_set():
                         raise ProcessingCancelled()
                     # Re-read before validation: a stale result must never overwrite edits.
@@ -349,7 +360,7 @@ async def worker_status():
 
 
 @app.post('/api/community-worker/connect')
-async def worker_connect():
+async def worker_connect(provider: Literal['kaggle'] = 'kaggle', replace: bool = False):
     async with app.state.gpu_lock:
         if app.state.live_lock.locked() or summary_locks or qa_locks:
             raise HTTPException(409, 'Dừng live hoặc chờ trợ lý xử lý xong trước khi kết nối lại.')
@@ -362,7 +373,7 @@ async def worker_connect():
             if worker:
                 notebook = (worker[1]/'worker.ipynb').read_text(encoding='utf-8')
                 same_link = url + '/worker/' + worker[0] in notebook
-            if not same_link:
+            if not same_link or replace:
                 community_queue.create(url)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -370,12 +381,12 @@ async def worker_connect():
 
 
 @app.get('/api/community-worker/notebook')
-async def worker_notebook():
+async def worker_notebook(provider: Literal['kaggle'] | None = None):
     worker = community_queue.current()
     if not worker:
         raise HTTPException(404, 'Connect a worker first.')
     community_queue.refresh_notebook(worker)
-    return FileResponse(worker[1]/'worker.ipynb', filename='voxmeet-community-worker-audio-reference-v2.2.ipynb',
+    return FileResponse(worker[1]/'worker.ipynb', filename='voxmeet-kaggle-live-translate-v3.0.ipynb',
                         headers={'Cache-Control': 'no-store'})
 
 
@@ -505,6 +516,8 @@ async def create_translation(mid: str, body: TranslationRequest):
         require_worker('llm')
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if mid in live_translation.running:
+        live_translation.configure(item,'off')
     summary_locks.add(mid)
     item = store.patch(mid, translation_status='processing', translation_error=None,
         translation_target=body.target_language, translation_progress=None)
@@ -536,7 +549,7 @@ async def run_summary(mid, snapshot, provider):
             update_assistant(current, summary_status='error', summary_error='Transcript changed. Generate a new draft from your edits.')
         else:
             result['through_seconds']=max((s['end'] for s in snapshot['segments']),default=0)
-            update_assistant(current, summary=result, summary_history=(current.get('summary_history') or [])+[result], summary_status='ready', summary_error=None)
+            update_assistant(current, summary=result, summary_history=(current.get('summary_history') or [])+[result], summary_status='ready', summary_error=None, summary_pending_through=None)
     except Exception as exc:
         current = get(mid)
         update_assistant(current, summary_status='error', summary_error=friendly_error(exc))
@@ -553,7 +566,7 @@ async def create_summary(mid: str, body: SummaryRequest):
         raise HTTPException(400, 'Create or import a transcript first.')
     if body.provider == 'api' and not capabilities()['llm_api_configured']:
         raise HTTPException(400, 'Configure LLM_API_URL, LLM_API_KEY and LLM_API_MODEL, then restart.')
-    update_assistant(item, summary_status='processing', summary_error=None)
+    update_assistant(item, summary_status='processing', summary_error=None, summary_started_at=time.time(),summary_pending_through=max((s['end'] for s in item['segments']),default=0))
     summary_locks.add(mid)
     snapshot=copy.deepcopy(item)
     snapshot['summary_language']=body.language
@@ -622,9 +635,9 @@ def apply_gpu_result(item, raw):
 @app.post('/api/recordings/{mid}/gpu-result')
 async def gpu_result(mid: str, file: UploadFile):
     try:
-        raw = await file.read(5 * 1024 * 1024 + 1)
-        if len(raw) > 5 * 1024 * 1024:
-            raise ValueError('Maximum result size is 5 MB.')
+        raw = await file.read(MAX_GPU_RESULT_BYTES + 1)
+        if len(raw) > MAX_GPU_RESULT_BYTES:
+            raise ValueError('Maximum result size is 32 MB.')
         item = get(mid)
         if mid in locks or (mid in summary_locks or mid in qa_locks) or item['status'] in ACTIVE:
             raise HTTPException(409, 'Wait for current processing to finish.')
@@ -758,7 +771,7 @@ async def run_question(mid, snapshot, question, provider):
             update_assistant(current,qa_status='error',qa_error='Transcript changed. Ask again using the corrected transcript.')
         else:
             entry=dict(question=question,revision=current['revision'],provider=provider,through_seconds=max((s['end'] for s in snapshot['segments']),default=0),**result)
-            update_assistant(current,qa_status='ready',qa_error=None,qa_pending=None,qa=(current.get('qa') or [])+[entry])
+            update_assistant(current,qa_status='ready',qa_error=None,qa_pending=None,qa_pending_through=None,qa=(current.get('qa') or [])+[entry])
     except Exception as exc:
         update_assistant(get(mid),qa_status='error',qa_error=friendly_error(exc))
     finally:
@@ -775,7 +788,7 @@ async def ask_question(mid: str, body: QuestionRequest):
     if body.provider=='api' and not capabilities()['llm_api_configured']:
         raise HTTPException(400,'Configure the language model API first.')
     qa_locks.add(mid)
-    update_assistant(item,qa_status='processing',qa_error=None,qa_pending=body.question.strip(),qa_started_at=time.time())
+    update_assistant(item,qa_status='processing',qa_error=None,qa_pending=body.question.strip(),qa_started_at=time.time(),qa_pending_through=max((s['end'] for s in item['segments']),default=0))
     launch(run_question(mid,copy.deepcopy(item),body.question.strip(),body.provider))
     return public(item)
 

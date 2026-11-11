@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet · Live meeting</title><link rel="stylesheet" href="/style.css?v=8"><link rel="stylesheet" href="/live.css"><link rel="stylesheet" href="/chat-dock.css?v=10"><link rel="stylesheet" href="/vintage.css?v=5"></head>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VoxMeet · Live meeting</title><link rel="stylesheet" href="/style.css?v=8"><link rel="stylesheet" href="/live.css?v=2"><link rel="stylesheet" href="/chat-dock.css?v=10"><link rel="stylesheet" href="/vintage.css?v=5"></head>
 <body class="function-page menu-collapsed"><aside class="sidebar">
   <a class="brand" href="/" aria-label="VoxMeet home"><span class="logo" aria-hidden="true">≋</span>voxmeet<span class="lab">LAB</span></a>
   <div class="sidebar-caption">YOUR WORKSPACE</div>
@@ -27,6 +27,12 @@
 <p id="timing"></p><a id="saved" class="button" hidden>Open saved meeting →</a>
 </div>
 <h2>Live transcript <span class="tag">Draft</span></h2>
+<div class="live-translation-controls">
+<label><span id="live-translation-label">Dịch song song</span> <select id="live-translation-mode">
+<option value="off">Tắt dịch</option><option value="en-vi">English → Tiếng Việt</option><option value="vi-en">Tiếng Việt → English</option>
+</select></label><button id="live-translation-retry" class="button secondary" hidden>Thử lại</button>
+<span id="live-translation-status" role="status"></span></div>
+<div id="bilingual-head" class="bilingual-head" hidden><span id="original-heading">Bản gốc</span><span id="translated-heading">Bản dịch</span></div>
 <div id="turns" aria-live="polite"></div>
 
 <section class="summary-panel" id="live-assistant">
@@ -39,14 +45,13 @@
 <p id="question-state" role="status"></p>
 </section></section>
 <section id="library-panel" hidden><iframe id="recordings-frame" title="Recordings library"></iframe></section></main><dialog id="setup-dialog"><div class="dialog-heading"><div><p class="eyebrow">GET READY TO TRANSCRIBE</p><h2>Processing setup</h2></div><button id="close-setup" class="close" aria-label="Close setup">×</button></div>
-  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><section class="summary-panel"><h3>Community-1 automatic worker</h3>
-<p>Start one private Kaggle GPU notebook per session. Then use Create transcript here for each recording; audio, đoạn live và transcript dùng cho tóm tắt/chat được gửi tới Kaggle qua Cloudflare khi chọn chế độ GPU. Keep the local server running.</p>
-<button id="community-connect" class="button" type="button">Connect Kaggle worker</button>
-<a id="community-notebook" class="button secondary" href="/api/community-worker/notebook" hidden>Download session notebook</a>
+  <p class="dialog-intro">Choose one path. Local mode processes audio on your computer; API mode sends it to Deepgram.</p><section class="summary-panel"><h3>Community-1 · Kaggle GPU</h3>
+<button id="community-connect" class="button" type="button">Kết nối worker Kaggle</button>
+<a id="community-notebook" class="button secondary" href="/api/community-worker/notebook" hidden>Tải notebook Kaggle</a>
 <p id="community-status" role="status"></p>
-<p>In Kaggle: import the notebook, enable GPU and Internet, add HF_TOKEN in Secrets, then run setup and the worker cell. Do not share this notebook: it contains a temporary connection key.</p></section><div id="connections"></div>
+<p>Bật GPU, Internet và Secret HF_TOKEN trong notebook Kaggle. Giữ server local chạy; không chia sẻ notebook chứa khóa phiên.</p></section><div id="connections"></div>
   <details open><summary>Local · No account required</summary><p>Run <code>setup.ps1 -LocalModels</code> once to install the libraries and download English Whisper and speaker recognition models. After setup, recordings are processed on this computer without sending audio elsewhere.</p><p>No API key or Hugging Face token is needed. CPU processing can take longer than the recording itself.</p></details>
   <details><summary>API · Deepgram</summary><p>Set <code>DEEPGRAM_API_KEY</code> in <code>meeting-ai/.env</code> and restart. This may incur provider usage charges. The key stays on the backend.</p></details>
   <details><summary>Summary · Local or API</summary><p>For local drafts, start Ollama and run <code>ollama pull qwen2.5:3b</code>. Set <code>OLLAMA_MODEL=qwen2.5:3b</code> in .env. CPU generation can take several minutes. API mode uses <code>LLM_API_URL</code>, <code>LLM_API_KEY</code>, and <code>LLM_API_MODEL</code>; selecting it sends transcript text to that provider.</p><p>Chế độ Kaggle GPU dùng worker đang kết nối để nhận diện, tóm tắt và hỏi đáp. Không cần bật Ollama khi chọn GPU. Lần đầu tải model có thể lâu hơn.</p></details>
   <p class="setup-note">Local status checks installed libraries and downloaded files. API status checks only whether a key is configured. Full instructions are in <code>meeting-ai/README.md</code>.</p><button id="refresh-setup" class="button secondary">Refresh connection status</button>
-</dialog><script src="/live.js?v=19" type="module"></script><script type="module" src="/chat-dock.js?v=10"></script><script type="module" src="/community-setup.js?v=13"></script><script type="module" src="/ui-language.js?v=12"></script></body></html>
+</dialog><script src="/live.js?v=24" type="module"></script><script type="module" src="/chat-dock.js?v=10"></script><script type="module" src="/community-setup.js?v=15"></script><script type="module" src="/ui-language.js?v=12"></script></body></html>

@@ -51,7 +51,7 @@ async def status():
     except (OSError,ValueError,KeyError):ready=False
     from .community_queue import status as worker_status
     worker = worker_status()
-    return dict(gpu_ready=worker['connected'] and 'live_asr' in worker.get('features',[]),speaker_refinement_ready=worker['connected'] and {'live_refine','shared_turns'}.issubset(worker.get('features',[])),ready=ready,model='Streaming Zipformer English · CPU',max_minutes=30)
+    return dict(translation_ready=worker.get('assistant_ready',False) and 'llm' in worker.get('features',[]) and (worker.get('gpu_count') or 0)>=2 and worker.get('available_for_jobs',False),gpu_state=worker.get('startup_state'),assistant_state=worker.get('assistant_state'),gpu_provider=worker.get('provider'),gpu_ready=worker['connected'] and 'live_asr' in worker.get('features',[]),speaker_refinement_ready=False,speaker_labels_mode='record_only',ready=ready,model='Streaming Zipformer English · CPU',max_minutes=30)
 
 class Session:
     def __init__(self,item,recognizer,enabled,resume=False):
@@ -180,6 +180,8 @@ async def stream(ws:WebSocket):
                     normal=True;break
                 packet=message.get('bytes');t=time.perf_counter()
                 changes=await asyncio.to_thread(session.feed,packet)
+                from . import live_translation
+                live_translation.observe(item['id'],changes)
                 await ws.send_json(dict(type='update',turns=changes,frames=session.frames,
                     processing_ms=round((time.perf_counter()-t)*1000)))
         except WebSocketDisconnect:pass

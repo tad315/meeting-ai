@@ -1,0 +1,14 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('web/step-one/live.js','utf8');
+const code=source.slice(source.indexOf('function render(turn){'),source.indexOf('async function stop()'));
+const ctx={turns:new Map(),liveTranslations:new Map(),paintPending:false,paints:0,bilingualMode:()=>true};
+ctx.requestAnimationFrame=()=>ctx.paints++;
+vm.createContext(ctx);vm.runInContext(code,ctx);
+const turn={id:'a',text:'Hello.',start:0,end:1,committed:true};
+ctx.render(turn);assert.equal(ctx.paints,1);ctx.paintPending=false;
+for(let i=0;i<100;i++)ctx.render({...turn});
+assert.equal(ctx.paints,1,'unchanged polling should not repaint');
+ctx.liveTranslations.set('a',{source_text:'Hello.',text:'Xin chào.'});ctx.render(turn);
+assert.equal(ctx.paints,2,'new translation must repaint');ctx.paintPending=false;
+ctx.render({...turn,text:'Goodbye.'});assert.equal(ctx.turns.get('a')._translationText,null,'stale translation must not match revised source');
+console.log('Translation render: unchanged polls skipped, translated/revised rows update OK');

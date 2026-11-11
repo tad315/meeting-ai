@@ -94,25 +94,47 @@ def evidence_text(segments, speakers):
                      f"{speakers.get(s['speaker'], 'Unassigned')}: {s['text']}" for s in segments)
 
 
+def retrieval_tokens(text):
+    """Accent-tolerant lexical tokens, without guessing translations."""
+    import unicodedata
+    text=unicodedata.normalize('NFD',str(text).casefold()).replace('đ','d')
+    text=''.join(c for c in text if not unicodedata.combining(c))
+    return re.findall(r'[^\W_]+',text)
+
+
 def retrieve(question, segments, limit=16):
-    """Lexical retrieval with adjacent turns. Small meetings retain full context."""
-    if len(segments) <= limit:
-        return segments
-    tokens = lambda text: re.findall(r'[^\W_]+', text.lower())
-    query = set(tokens(question)) - {'the', 'a', 'is', 'what', 'who', 'did', 'was', 'in', 'to', 'of', 'and'}
-    documents = [Counter(tokens(s['text'])) for s in segments]
-    df = Counter(token for doc in documents for token in doc)
-    ranked = sorted(range(len(segments)), key=lambda i: -sum(
-        math.log(1 + len(segments) / (1 + df[t])) * min(documents[i][t], 3) for t in query))
-    selected = set()
+    """Length-normalized BM25 plus bounded neighboring answer/context turns."""
+    if limit<=0:return []
+    if len(segments)<=limit:return segments
+    stop={'the','a','an','is','are','what','who','did','was','in','to','of','and',
+          'la','gi','cua','va','cho','toi','hay','co','khong','duoc','da','trong','nao','bao','nhieu'}
+    query=set(retrieval_tokens(question))-stop
+    documents=[Counter(retrieval_tokens(s['text'])) for s in segments]
+    df=Counter(token for doc in documents for token in doc)
+    lengths=[sum(doc.values()) for doc in documents];average=max(1,sum(lengths)/len(lengths))
+    def score(i):
+        total=0.
+        for token in query:
+            frequency=min(documents[i][token],3)  # Bound repeated ASR/boilerplate terms.
+            if not frequency:continue
+            idf=math.log(1+(len(documents)-df[token]+.5)/(df[token]+.5))
+            total+=idf*frequency*2.2/(frequency+1.2*(.25+.75*lengths[i]/average))
+        return total
+    scores=[score(i) for i in range(len(segments))]
+    ranked=sorted(range(len(segments)),key=lambda i:(-scores[i],i))
+    # Reserve several relevant anchors before expanding context. Otherwise a
+    # single hit and its neighbors can crowd out a distant cause or objection.
+    anchors=[i for i in ranked if scores[i]>0][:max(1,limit//3)]
+    selected=set(anchors)
     for i in ranked:
-        if not query.intersection(documents[i]):
-            continue
-        for index in (i, i - 1, i + 1):
-            if 0 <= index < len(segments) and len(selected) < limit:
-                selected.add(index)
-        if len(selected) >= limit:
-            break
+        if scores[i]<=0:break
+        # A fragmented short reply may span more than one neighboring turn.
+        adjacent=[i,i-1,i+1]
+        if i+1<len(segments) and lengths[i+1]<8:adjacent.append(i+2)
+        if i>0 and lengths[i-1]<8:adjacent.append(i-2)
+        for index in adjacent:
+            if 0<=index<len(segments) and len(selected)<limit:selected.add(index)
+        if len(selected)>=limit:break
     return [segments[i] for i in sorted(selected)]
 
 
