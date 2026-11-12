@@ -3,7 +3,7 @@
 This is inference, not training. The original evaluated Community-1 revision and
 Whisper small.en are used. No speaker accuracy target is guaranteed.
 
-1. Start the local demo on port 8009. Open Setup → Connect Kaggle worker.
+1. Start the app with run.ps1 (http://127.0.0.1:8009, the only port: the Kaggle worker API is served under /gpu). Open Setup → Connect Kaggle worker.
 2. Download the session notebook and import it into a PRIVATE Kaggle notebook.
 3. Enable GPU and Internet. Add HF_TOKEN to Kaggle Secrets and grant notebook access.
    The Hugging Face account must have accepted Community-1 access conditions.

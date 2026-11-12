@@ -158,7 +158,7 @@ class RelayHeartbeatTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(json.loads((folder / 'features.json').read_text()), ['multilingual', 'flac_audio'])
             self.assertTrue((folder / 'heartbeat').exists())
-            self.assertEqual(client.get('/bridge-health').json()['code'], gpu_bridge.CODE_VERSION)
+            self.assertIn('instance', client.get('/bridge-health').json())
 
 
 class AtomicWriteTests(unittest.TestCase):

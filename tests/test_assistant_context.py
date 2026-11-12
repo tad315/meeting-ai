@@ -33,7 +33,7 @@ class ContextTests(unittest.TestCase):
         item=transcript(['Cuộc họp bàn ngân sách.']);item['qa']=[dict(revision=1,question='Câu hỏi cũ không liên quan',points=[])]
         async def fake(messages,*args,**kwargs):
             self.assertIn('Previous questions (context only): []',messages[-1]['content'])
-            self.assertIn('(0–1 seconds)',messages[-1]['content'])
+            self.assertIn('(0:00)',messages[-1]['content'])
             return '{"answerable":false,"points":[]}'
         with patch('app.meeting_qa.chat',fake):asyncio.run(answer(item,'Cuộc họp bàn về gì?','kaggle'))
     def test_cross_language_retrieval_miss_rewrites_question_not_answer(self):
@@ -77,7 +77,7 @@ class SummaryContextTests(unittest.TestCase):
             return json.dumps(dict(bullets=[dict(category='topic',text='Cuộc họp thảo luận kế hoạch ra mắt sản phẩm vào tháng tới.',ids=['1']),dict(category='proposal',text='Đề xuất ra mắt sản phẩm vào tháng tới.',ids=['1'])]))
         with patch('app.demo_features.chat',fake):result=asyncio.run(draft_summary(item,'kaggle'))
         self.assertEqual(len(calls),1)
-        self.assertTrue(result['overview']);self.assertEqual(result['sections'][0]['bullets'][0]['category'],'proposal')
+        self.assertTrue(result['overview']);self.assertEqual(result['sections'][0]['bullets'][0]['category'],'discussion')
     def test_chunk_context_is_provided_but_cannot_be_cited_as_current_alias(self):
         item=transcript(['This is the beginning of a long discussion. '*80,'This preceding point sets context. '*80,'This is a later discussion of a related topic. '*80],'en')
         calls=[]
@@ -107,7 +107,7 @@ class SummaryBudgetTests(unittest.TestCase):
 
 class OverviewSamplingTests(unittest.TestCase):
     def test_long_source_overview_keeps_both_ends_not_only_opening(self):
-        text='START_POLICY '+('extended discussion '*800)+' END_OPPOSITION'
+        text='START_POLICY opposing team '+('extended discussion '*800)+' END_OPPOSITION'
         item=transcript([text],'en');calls=[]
         async def fake(messages,*args,**kwargs):
             calls.append(messages)

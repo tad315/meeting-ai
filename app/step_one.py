@@ -12,7 +12,6 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 import hashlib
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import store
 from .providers import capabilities, check_provider, friendly_error, normalize, transcribe
@@ -23,6 +22,7 @@ import json
 import copy
 from .gpu_exchange import make_package, validate_result
 from . import gpu_connection
+from . import gpu_bridge
 from . import community_queue
 from .meeting_qa import answer as answer_meeting_question
 from .turn_editing import split_turn, word_boundaries
@@ -48,20 +48,21 @@ async def lifespan(app):
     app.state.queue = asyncio.Lock()
     app.state.live_lock = asyncio.Lock()
     app.state.gpu_lock = asyncio.Lock()
+    gpu_bridge.ROOT = store.DATA/'gpu-bridge'
 
-    async def relay_watchdog():
-        # The Kaggle relay is a separate process; restart it if it stopped so
-        # an already-running worker notebook reconnects on its own.
+    async def link_watchdog():
+        # Keep the Kaggle link alive while a worker session exists: a dead quick
+        # tunnel is replaced and the new URL is published for the notebook.
         while True:
             try:
-                await asyncio.to_thread(gpu_connection.ensure_relay)
+                if community_queue.current():
+                    await asyncio.to_thread(gpu_connection.ensure_link)
             except Exception:
                 pass
-            await asyncio.sleep(15)
-    watchdog = asyncio.create_task(relay_watchdog())
+            await asyncio.sleep(20)
+    watchdog = asyncio.create_task(link_watchdog())
     yield
     watchdog.cancel()
-    # The authenticated relay persists so notebook URLs survive app restarts.
     await live_translation.shutdown()
     pending = list(tasks)
     for event in cancel_events.values():
@@ -72,7 +73,16 @@ async def lifespan(app):
 
 
 app = FastAPI(title='VoxMeet · Step 1', lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
+# Kaggle worker API lives under /gpu on the same port as the app.
+app.mount(gpu_connection.PREFIX, gpu_bridge.bridge)
+LOCAL_HOSTS = {'127.0.0.1', 'localhost', 'testserver'}
+
+
+def public_request(request):
+    """Arrived through the Cloudflare tunnel (never true for the local browser)."""
+    host = (request.headers.get('host') or '').split(':')[0].lower()
+    return (host.endswith('.trycloudflare.com') or 'cf-ray' in request.headers
+            or 'cf-connecting-ip' in request.headers)
 
 
 @app.middleware('http')
@@ -86,6 +96,23 @@ async def local_origin(request: Request, call_next):
     if request.url.path == '/' or request.url.path.endswith(('.js', '.css')):
         response.headers['Cache-Control'] = 'no-cache'
     return response
+
+
+@app.middleware('http')
+async def gate(request: Request, call_next):
+    """Outermost check. The tunnel may reach ONLY the /gpu worker API (token
+    protected); the app, recordings and audio stay local-only."""
+    path = request.url.path
+    gpu = path == gpu_connection.PREFIX or path.startswith(gpu_connection.PREFIX + '/')
+    if public_request(request):
+        if not gpu:
+            return PlainTextResponse('Not found.', status_code=404)
+    elif not gpu:
+        # DNS-rebinding protection for the local app (was TrustedHostMiddleware).
+        host = (request.headers.get('host') or '').split(':')[0].lower()
+        if host not in LOCAL_HOSTS:
+            return PlainTextResponse('Invalid host header', status_code=400)
+    return await call_next(request)
 
 
 def get(mid):
@@ -290,7 +317,7 @@ async def upload(file: UploadFile):
 
 class TranscribeRequest(BaseModel):
     provider: Literal['local', 'deepgram', 'community'] = 'local'
-    num_speakers: int | None = Field(default=None, ge=1, le=12)
+    num_speakers: int | None = Field(default=None, ge=1, le=20)
     turn_policy: Literal['shared-sentence-v1','legacy'] = 'legacy'
     language: Literal['vi', 'en', 'auto'] = 'en'
 
@@ -418,13 +445,10 @@ async def worker_connect(provider: Literal['kaggle'] = 'kaggle', replace: bool =
             raise HTTPException(409, 'Wait for Community-1 jobs to finish or cancel them first.')
         try:
             url = await asyncio.to_thread(gpu_connection.connect)
-            worker = community_queue.current()
-            same_link = False
-            if worker:
-                notebook = (worker[1]/'worker.ipynb').read_text(encoding='utf-8')
-                same_link = url + '/worker/' + worker[0] in notebook
-            if not same_link or replace:
-                community_queue.create(url)
+            # A new public URL no longer needs a new worker session: the running
+            # notebook discovers the URL itself. Only "Recreate" rotates the key.
+            if replace or not community_queue.current():
+                community_queue.create(url, gpu_connection.rendezvous_topic())
         except ValueError as exc:
             raise HTTPException(400, str(exc))
     return community_queue.status()
@@ -435,7 +459,12 @@ async def worker_notebook(provider: Literal['kaggle'] | None = None):
     worker = community_queue.current()
     if not worker:
         raise HTTPException(404, 'Connect a worker first.')
-    community_queue.refresh_notebook(worker)
+    # Embed a link that works right now (creates a new one if the old died).
+    try:
+        url = await asyncio.to_thread(gpu_connection.connect)
+    except ValueError:
+        url = gpu_connection.current_url()
+    community_queue.refresh_notebook(worker, url, gpu_connection.rendezvous_topic())
     return FileResponse(worker[1]/'worker.ipynb', filename='voxmeet-kaggle-live-translate-v3.0.ipynb',
                         headers={'Cache-Control': 'no-store'})
 
@@ -488,23 +517,81 @@ class EditTurn(BaseModel):
     speaker: str | None = None
 
 
+NEW_SPEAKER = '__new__'
+
+
+def resolve_speaker(item, value):
+    """Existing speaker id, None (unassigned) or NEW_SPEAKER -> a new label.
+    Lets a reviewer separate people the clustering merged into one speaker."""
+    if value != NEW_SPEAKER:
+        return value
+    speakers = item.setdefault('speakers', {})
+    if len(speakers) >= 30:
+        raise HTTPException(400, 'Too many speakers.')
+    ids = [int(k) for k in speakers if str(k).isdigit()]
+    new_id = str(max(ids, default=-1) + 1)
+    names = set(speakers.values())
+    number = len(speakers)
+    while f'SPEAKER_{number:02d}' in names:
+        number += 1
+    speakers[new_id] = f'SPEAKER_{number:02d}'
+    return new_id
+
+
 @app.patch('/api/recordings/{mid}/segments/{sid}')
 async def edit_turn(mid: str, sid: str, body: EditTurn):
     item = get(mid)
     if mid in locks or item['status'] in ACTIVE or item['revision'] != body.revision:
         raise HTTPException(409, 'Transcript changed or is processing. Reopen it and retry.')
-    if body.speaker is not None and body.speaker not in item['speakers']:
+    if body.speaker not in (None, NEW_SPEAKER) and body.speaker not in item['speakers']:
         raise HTTPException(400, 'Choose an existing speaker or Unassigned.')
     if not body.text.strip():
         raise HTTPException(400, 'Text cannot be blank.')
     segment = next((s for s in item['segments'] if s['id'] == sid), None)
     if segment is None:
         raise HTTPException(404, 'Turn not found.')
+    speaker = resolve_speaker(item, body.speaker)
     segment.setdefault('original_text', segment['text'])
     segment.setdefault('original_speaker', segment['speaker'])
     segment.pop('speaker_spans', None)
     segment.pop('speaker_status', None)
-    segment.update(text=body.text.strip(), speaker=body.speaker, edited=True)
+    segment.update(text=body.text.strip(), speaker=speaker, edited=True)
+    update(item, revision=item['revision'] + 1, summary=None, messages=[], qa=[], summary_error=None)
+    return public(item)
+
+
+@app.get('/api/recordings/{mid}/segments/{sid}/similar')
+async def similar_turns(mid: str, sid: str):
+    """Sentences whose voice matches the speaker just assigned to `sid`."""
+    from .voice_match import similar_segments
+    item = get(mid)
+    return await asyncio.to_thread(similar_segments, item, sid)
+
+
+class SpeakerBatch(BaseModel):
+    revision: int
+    segment_ids: list[str] = Field(min_length=1, max_length=500)
+    speaker: str
+
+
+@app.post('/api/recordings/{mid}/speaker-batch')
+async def assign_speaker_batch(mid: str, body: SpeakerBatch):
+    item = get(mid)
+    if mid in locks or item['status'] in ACTIVE or item['revision'] != body.revision:
+        raise HTTPException(409, 'Transcript changed or is processing. Reopen it and retry.')
+    if body.speaker not in item['speakers']:
+        raise HTTPException(400, 'Choose an existing speaker.')
+    wanted = set(body.segment_ids)
+    changed = 0
+    for segment in item['segments']:
+        if segment['id'] in wanted:
+            segment.setdefault('original_speaker', segment['speaker'])
+            segment.pop('speaker_spans', None)
+            segment.pop('speaker_status', None)
+            segment.update(speaker=body.speaker, edited=True)
+            changed += 1
+    if not changed:
+        raise HTTPException(404, 'Turns not found.')
     update(item, revision=item['revision'] + 1, summary=None, messages=[], qa=[], summary_error=None)
     return public(item)
 
@@ -592,8 +679,9 @@ class SummaryRequest(BaseModel):
 
 async def run_summary(mid, snapshot, provider):
     try:
-        async with app.state.queue:
-            result = await draft_summary(snapshot, provider)
+        # Not behind app.state.queue: a summary must not wait for a recording
+        # being transcribed on another GPU (or block questions for minutes).
+        result = await draft_summary(snapshot, provider)
         current = get(mid)
         if current['revision'] != snapshot['revision']:
             update_assistant(current, summary_status='error', summary_error='Transcript changed. Generate a new draft from your edits.')
@@ -631,6 +719,25 @@ async def export_summary(mid: str):
     if not summary or summary['revision'] != item['revision']:
         raise HTTPException(409, 'Generate a summary for the current transcript first.')
     lines = [item['title'], summary['label'], '']
+    if summary.get('format') == 'minutes':
+        points = [b for section in summary['sections'] for b in section['bullets']]
+        headings = [('decision', 'Quyết định'), ('action', 'Việc cần làm'),
+                    ('discussion', 'Nội dung chính' if summary.get('kind') == 'talk' else 'Vấn đề đã thảo luận'),
+                    ('open_question', 'Còn bỏ ngỏ')]
+        if summary.get('overview'):
+            lines.append('Tổng quan')
+            lines += [p['text'] + ' [' + ', '.join(p['ids']) + ']' for p in summary['overview']]
+            lines.append('')
+        for category, heading in headings:
+            rows = [b for b in points if b.get('category') == category]
+            if not rows:
+                continue
+            lines.append(heading)
+            for b in rows:
+                details = (f" · Phụ trách: {b['owner']}" if b.get('owner') else '') + (f" · Hạn: {b['deadline']}" if b.get('deadline') else '')
+                lines.append(f"- {b['text']}{details} [{', '.join(b['ids'])}]")
+            lines.append('')
+        return PlainTextResponse('\n'.join(lines), headers={'Content-Disposition': f'attachment; filename="summary-{mid}.txt"'})
     if summary.get('overview'):
         lines.append('Tóm tắt nội dung')
         for paragraph in summary['overview']:
@@ -642,7 +749,7 @@ async def export_summary(mid: str):
         for b in section['bullets']:
             details = ''
             if b.get('category') == 'action' and ('owner' in b or 'deadline' in b):
-                details = f" · Phụ trách: {b.get('owner') or 'Chưa nêu'} · Hạn chót: {b.get('deadline') or 'Chưa nêu'}"
+                details = (f" · Phụ trách: {b['owner']}" if b.get('owner') else '') + (f" · Hạn: {b['deadline']}" if b.get('deadline') else '')
             lines.append(f"- [{labels.get(b.get('category'), 'Thảo luận')}] {b['text']}{details} [{', '.join(b['ids'])}]")
     return PlainTextResponse('\n'.join(lines), headers={'Content-Disposition': f'attachment; filename="summary-{mid}.txt"'})
 
@@ -790,12 +897,14 @@ async def split_segment(mid: str, sid: str, body: SplitTurnRequest):
     item = get(mid)
     if mid in locks or item['status'] in ACTIVE or item['revision'] != body.revision:
         raise HTTPException(409, 'Transcript changed or is processing. Reopen it and retry.')
-    if any(label is not None and label not in item['speakers'] for label in (body.left_speaker,body.right_speaker)):
+    if any(label not in (None, NEW_SPEAKER) and label not in item['speakers'] for label in (body.left_speaker,body.right_speaker)):
         raise HTTPException(400,'Choose existing speaker labels.')
     index = next((i for i,s in enumerate(item['segments']) if s['id']==sid),None)
     if index is None: raise HTTPException(404,'Turn not found.')
+    left = resolve_speaker(item, body.left_speaker)
+    right = resolve_speaker(item, body.right_speaker)
     try:
-        parts = split_turn(item['segments'][index],body.offset,body.at,body.left_speaker,body.right_speaker)
+        parts = split_turn(item['segments'][index],body.offset,body.at,left,right)
     except ValueError as exc:
         raise HTTPException(400,str(exc))
     backup = store.DATA/mid/f'transcript-before-split-r{item["revision"]}-{time.time_ns()}.json'
@@ -814,8 +923,10 @@ class QuestionRequest(BaseModel):
 
 async def run_question(mid, snapshot, question, provider):
     try:
-        async with app.state.queue:
-            result = await asyncio.wait_for(answer_meeting_question(snapshot,question,provider), timeout=660 if provider == 'kaggle' else 180)
+        # Questions run beside transcription/summaries; the Kaggle worker
+        # interleaves model jobs in arrival order, so an answer is not stuck
+        # behind a whole summary.
+        result = await asyncio.wait_for(answer_meeting_question(snapshot,question,provider), timeout=660 if provider == 'kaggle' else 180)
         current=get(mid)
         if current['revision'] != snapshot['revision']:
             update_assistant(current,qa_status='error',qa_error='Transcript changed. Ask again using the corrected transcript.')

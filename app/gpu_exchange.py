@@ -106,7 +106,7 @@ def validate_result(payload, item):
                 labels=info.get('reference_labels')
                 baseline=payload.get('baseline_diarization_turns')
                 windows=diagnostic[1:]
-                valid=(isinstance(labels,list) and 2<=len(labels)<=8 and all(isinstance(x,str) for x in labels)
+                valid=(isinstance(labels,list) and 2<=len(labels)<=20 and all(isinstance(x,str) for x in labels)
                        and len(set(labels))==len(labels) and isinstance(baseline,list) and len(baseline)<=50000)
                 valid=valid and all(isinstance(t,dict) and t.get('speaker') in labels
                     and all(type(t.get(k)) in (int,float) and math.isfinite(t[k]) for k in ('start','end'))
@@ -122,11 +122,25 @@ def validate_result(payload, item):
         words = payload.get('words')
         if not isinstance(words, list) or not words:
             raise ValueError('Missing word timestamps for sentence alignment.')
-        payload = dict(payload, utterances=baseline_sentence_labels(words, tracks))
+        # Drop text Whisper invents on silence/music (e.g. YouTube outros).
+        from .hallucination import clean_words
+        words, invented = clean_words(words)
+        if not words:
+            raise ValueError('No speech detected. Try clearer audio; no transcript will be replaced.')
+        payload = dict(payload, utterances=baseline_sentence_labels(words, tracks), removed_hallucinations=invented)
         provenance = dict(provenance, clustering='VBxClustering',
                           assignment_policy='shared-sentence-v1', alignment_revision=provenance.get('alignment_revision','server-vbx-sentences-1'))
+    if isinstance(payload.get('utterances'), list):
+        from .hallucination import clean_utterances
+        utterances, invented = clean_utterances(payload['utterances'])
+        if invented and utterances:
+            payload = dict(payload, utterances=utterances,
+                           removed_hallucinations=(payload.get('removed_hallucinations') or []) + invented)
+    removed = payload.get('removed_hallucinations') or []
+    if removed:
+        provenance = dict(provenance, hallucinations_removed=len(removed))
     segments, speakers = import_transcript(payload)
     if any(s['end'] > item['duration'] + .1 for s in segments):
         raise ValueError('Transcript timestamps exceed the recording duration.')
     return segments, speakers, {k: str(provenance.get(k, ''))[:200] for k in
-                               ('asr_model', 'diarization_model', 'diarization_revision', 'language', 'clustering', 'assignment_policy', 'caption_core_sha256', 'alignment_revision', 'speaker_verifier', 'worker_build')}
+                               ('asr_model', 'diarization_model', 'diarization_revision', 'language', 'clustering', 'assignment_policy', 'caption_core_sha256', 'alignment_revision', 'speaker_verifier', 'worker_build', 'hallucinations_removed', 'asr_recovered_spans')}

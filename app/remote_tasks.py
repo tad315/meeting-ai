@@ -5,6 +5,7 @@ import time
 import uuid
 import zipfile
 from . import community_queue as queue
+from . import job_events
 
 
 def require_worker(feature):
@@ -36,6 +37,19 @@ def enqueue(task, audio=None):
     return folder
 
 
+def timing(folder):
+    """Wall-clock milestones of a finished job (seconds since epoch or None)."""
+    def stamp(name, key=None):
+        try:
+            if key:
+                return float(json.loads((folder/name).read_text())[key])
+            return (folder/name).stat().st_mtime
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+    return dict(created=stamp('session.json'), dispatched=stamp('dispatch.json', 'first_dispatched_at'),
+                received=stamp('received.json', 'received_at'))
+
+
 async def wait(folder, timeout=600, poll_interval=.4):
     if not .05 <= poll_interval <= 1:
         raise ValueError('Invalid polling interval')
@@ -53,12 +67,13 @@ async def wait(folder, timeout=600, poll_interval=.4):
                 raise ValueError('Worker mất kết nối. Dữ liệu đã lưu vẫn được giữ lại.')
             if time.monotonic()-started > timeout:
                 raise ValueError('Hết thời gian chờ GPU. Kiểm tra hàng đợi và notebook.')
-            await asyncio.sleep(poll_interval)
+            # Returns as soon as the worker API stores a result (same process).
+            await job_events.wait(poll_interval)
     finally:
         (folder/'closed').touch()
 
 
-async def chat(messages, schema, max_tokens, *, realtime_translation=False):
+async def chat(messages, schema, max_tokens, *, realtime_translation=False, with_timing=False):
     task = dict(kind='llm', messages=messages, schema=schema, max_tokens=max_tokens, realtime_translation=realtime_translation)
     if len(json.dumps(task, ensure_ascii=False)) > 100000:
         raise ValueError('Nội dung vượt giới hạn tác vụ LLM.')
@@ -67,4 +82,7 @@ async def chat(messages, schema, max_tokens, *, realtime_translation=False):
     text = result.get('text')
     if not isinstance(text, str) or len(text) > 50000:
         raise ValueError('Worker trả về nội dung LLM không hợp lệ.')
+    if with_timing:
+        timing = result.get('timing') if isinstance(result.get('timing'), dict) else {}
+        return text, timing
     return text

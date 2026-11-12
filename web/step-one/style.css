@@ -36,3 +36,5 @@
 
 /* Keep page context available to scripts without reserving a top bar. */
 body > main > header{display:none!important}
+
+#similar-dialog{width:min(680px,92vw)}.similar-intro{font-size:12px;color:#7d8f6d}.similar-list{max-height:55vh;overflow:auto;margin:12px 0 18px;border-top:1px solid var(--border)}.similar-row{display:grid;grid-template-columns:22px 52px 1fr auto;gap:10px;align-items:start;padding:10px 4px;border-bottom:1px solid var(--border);font-size:12px;line-height:1.6;cursor:pointer}.similar-row small{color:#8a9a7d;white-space:nowrap}.similar-row .time{padding:0}#similar-form .button{margin-right:8px}

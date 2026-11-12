@@ -113,10 +113,40 @@ async def transcribe(path, provider, num_speakers=None, report=None, cancel=None
         return group_words(words)
 
 
+import contextvars
+import time as _time
+
+# Collects one row per model call made inside a summary/answer, so each result
+# can report where its time went (calls, wall time, GPU generation, tokens).
+llm_calls = contextvars.ContextVar('llm_calls', default=None)
+
+
+def record_llm_call(row):
+    rows = llm_calls.get()
+    if rows is not None:
+        rows.append(row)
+
+
+def llm_timing(rows, started):
+    rows = rows or []
+    notes = [r['note'] for r in rows if r.get('note')]
+    rows = [r for r in rows if not r.get('note')]
+    total = lambda key: round(sum(r.get(key) or 0 for r in rows), 3)
+    return dict(seconds=round(_time.perf_counter() - started, 2), calls=len(rows),
+                model_seconds=total('seconds'), generation_seconds=total('generation_seconds'),
+                input_tokens=int(total('input_tokens')), output_tokens=int(total('output_tokens')),
+                cached_calls=sum(1 for r in rows if r.get('cached')), retries=notes)
+
+
 async def chat(messages, provider, schema=None, keep_alive=0, max_tokens=1000):
+    began = _time.perf_counter()
     if provider == 'kaggle':
         from .remote_tasks import chat as remote_chat
-        return await remote_chat(messages, schema, max_tokens)
+        text, timing = await remote_chat(messages, schema, max_tokens, with_timing=True)
+        record_llm_call(dict(provider='kaggle', seconds=round(_time.perf_counter() - began, 3),
+                             generation_seconds=timing.get('generation_seconds'),
+                             input_tokens=timing.get('input_tokens'), output_tokens=timing.get('output_tokens')))
+        return text
     async with httpx.AsyncClient(timeout=900) as client:
         if provider == 'ollama':
             url = os.getenv('OLLAMA_URL', 'http://localhost:11434').rstrip('/') + '/api/chat'
@@ -127,7 +157,11 @@ async def chat(messages, provider, schema=None, keep_alive=0, max_tokens=1000):
                                                         options={'temperature': 0, 'num_ctx': 8192, 'num_predict': max_tokens, 'num_thread': 2}))
             if response.is_error:
                 raise ValueError(f'Ollama returned HTTP {response.status_code}. Start Ollama and download the configured model.')
-            return response.json()['message']['content']
+            data = response.json()
+            record_llm_call(dict(provider='ollama', seconds=round(_time.perf_counter() - began, 3),
+                                 generation_seconds=round((data.get('eval_duration') or 0) / 1e9, 3),
+                                 input_tokens=data.get('prompt_eval_count'), output_tokens=data.get('eval_count')))
+            return data['message']['content']
         if provider != 'api' or not capabilities()['llm_api_configured']:
             raise ValueError('Configure LLM_API_URL, LLM_API_KEY and LLM_API_MODEL in .env first.')
         response = await client.post(os.environ['LLM_API_URL'].rstrip('/') + '/chat/completions',
@@ -135,7 +169,11 @@ async def chat(messages, provider, schema=None, keep_alive=0, max_tokens=1000):
                                      json=dict(model=os.environ['LLM_API_MODEL'], messages=messages, temperature=0.1))
         if response.is_error:
             raise ValueError(f'The language-model provider returned HTTP {response.status_code}.')
-        return response.json()['choices'][0]['message']['content']
+        data = response.json()
+        usage = data.get('usage') or {}
+        record_llm_call(dict(provider='api', seconds=round(_time.perf_counter() - began, 3),
+                             input_tokens=usage.get('prompt_tokens'), output_tokens=usage.get('completion_tokens')))
+        return data['choices'][0]['message']['content']
 
 
 def friendly_error(error):

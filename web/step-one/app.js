@@ -103,7 +103,13 @@ $('#close-setup').onclick=()=>$('#setup-dialog').close();$('#refresh-setup').onc
 function home(){current=null;history.replaceState(null,'',location.pathname);$('#audio').pause();$('#library').hidden=false;$('#detail').hidden=true;$('#breadcrumb').textContent='Recordings';refreshList().catch(e=>toast(e.message));}
 $('#home').onclick=home;$('#back').onclick=home;
 $('#transcribe').onclick=async()=>{
-  if(!current)return;const id=current.id;$('#transcribe').disabled=true;
+  if(!current)return;const id=current.id;
+  // Re-running replaces the transcript; warn when it holds manual corrections.
+  const corrected=(current.segments||[]).filter(s=>s.edited||s.split_from).length;
+  if(corrected&&!(await popup({title:uiText('Replace corrected transcript?','Thay transcript đã sửa tay?'),
+    message:uiText(`${corrected} corrected turn(s) will be replaced by the new result. A backup is kept and can be restored with: python tools\\restore_transcript.py ${id.slice(0,8)}`,
+                   `${corrected} câu đã sửa tay sẽ bị thay bằng kết quả mới. Bản cũ vẫn được lưu và khôi phục được bằng lệnh: python tools\\restore_transcript.py ${id.slice(0,8)}`)})))return;
+  $('#transcribe').disabled=true;
   try{const updated=await api(`/recordings/${id}/transcribe`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('#provider').value,language:$('#audio-language').value,turn_policy:$('#provider').value==='community'?$('#record-turn-policy').value:'legacy',num_speakers:$('#provider').value!=='deepgram'&&$('#speaker-count').value?Number($('#speaker-count').value):null})});if(current?.id===id){current=updated;renderDetail();}}
   catch(error){toast(error.message);refreshMode();}
 };
@@ -183,7 +189,7 @@ renderDetail=function(){
     button.disabled=active(current.status);
     button.onclick=()=>{
       editing={mid:current.id,sid:s.id,revision:current.revision};
-      $('#edit-speaker').innerHTML='<option value="">Unassigned</option>'+Object.entries(current.speakers).map(([id,name])=>`<option value="${escape(id)}">${escape(name)}</option>`).join('');
+      $('#edit-speaker').innerHTML='<option value="">Unassigned</option>'+Object.entries(current.speakers).map(([id,name])=>`<option value="${escape(id)}">${escape(name)}</option>`).join('')+`<option value="__new__">${uiText('+ New speaker','+ Người nói mới')}</option>`;
       $('#edit-speaker').value=s.speaker??'';$('#edit-text').value=s.text;$('#edit-dialog').showModal();
     };
     article.querySelector('div').append(button);
@@ -213,10 +219,37 @@ $('#colab-file').onchange=async()=>{
   catch(e){toast(e.message);}finally{$('#import-colab').disabled=false;$('#colab-file').value='';}
 };
 $('#cancel-edit').onclick=()=>$('#edit-dialog').close();
+// Correction propagation: after assigning a sentence to a speaker, offer the
+// other sentences whose voice matches that speaker (nothing changes until Apply).
+let similarState=null;
+async function offerSimilar(mid,sid){
+  let data;try{data=await api(`/recordings/${mid}/segments/${encodeURIComponent(sid)}/similar`);}catch(e){return;}
+  if(!data.available||!data.suggestions.length||current?.id!==mid)return;
+  similarState={mid,speaker:data.speaker,revision:current.revision};
+  const name=current.speakers[data.speaker]||data.speaker;
+  $('#similar-title').textContent=uiText(`${data.suggestions.length} sentence(s) sound like ${name}`,`${data.suggestions.length} câu có giọng giống ${name}`);
+  $('#similar-intro').textContent=uiText('Their voice matches the speaker you just chose better than their current label. Untick any that are wrong, then apply.','Giọng của các câu này giống người bạn vừa chọn hơn nhãn hiện tại. Bỏ chọn câu nào sai rồi bấm áp dụng.');
+  $('#similar-list').innerHTML=data.suggestions.map(s=>`<label class="similar-row"><input type="checkbox" value="${escape(s.id)}" checked><button type="button" class="time" data-time="${s.start}">${clock(s.start)}</button><span>${escape(s.text)}</span><small>${escape(current.speakers[s.speaker]||s.speaker||'—')} · ${Math.round(s.similarity*100)}%</small></label>`).join('');
+  $('#similar-apply').textContent=uiText(`Assign to ${name}`,`Đổi sang ${name}`);$('#similar-skip').textContent=uiText('Skip','Bỏ qua');
+  $('#similar-dialog').showModal();
+}
+$('#similar-skip').onclick=()=>$('#similar-dialog').close();
+$('#similar-form').onsubmit=async event=>{
+  event.preventDefault();if(!similarState)return;
+  const ids=[...document.querySelectorAll('#similar-list input:checked')].map(x=>x.value);
+  if(!ids.length){$('#similar-dialog').close();return;}
+  $('#similar-apply').disabled=true;
+  try{const item=await api(`/recordings/${similarState.mid}/speaker-batch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:similarState.revision,segment_ids:ids,speaker:similarState.speaker})});
+    $('#similar-dialog').close();if(current?.id===item.id){current=item;renderDetail();}toast(uiText(`${ids.length} sentence(s) reassigned.`,`Đã đổi ${ids.length} câu.`));}
+  catch(e){toast(e.message);}finally{$('#similar-apply').disabled=false;}
+};
 $('#edit-form').onsubmit=async event=>{
   event.preventDefault();if(!editing)return;
   $('#save-edit').disabled=true;
-  try{const item=await api(`/recordings/${editing.mid}/segments/${encodeURIComponent(editing.sid)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:editing.revision,text:$('#edit-text').value,speaker:$('#edit-speaker').value||null})});$('#edit-dialog').close();if(current?.id===item.id){current=item;renderDetail();}}
+  try{const before=current?.segments?.find(s=>s.id===editing.sid)?.speaker??null;const sid=editing.sid;
+    const item=await api(`/recordings/${editing.mid}/segments/${encodeURIComponent(editing.sid)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:editing.revision,text:$('#edit-text').value,speaker:$('#edit-speaker').value||null})});$('#edit-dialog').close();if(current?.id===item.id){current=item;renderDetail();}
+    const after=item.segments.find(s=>s.id===sid)?.speaker??null;
+    if(after!==null&&after!==before)await offerSimilar(item.id,sid);}
   catch(e){toast(e.message);}finally{$('#save-edit').disabled=false;}
 };
 setInterval(async()=>{
@@ -233,7 +266,7 @@ async function openSplit(segment){
   if(current?.id!==mid)return;
   splitting={mid,sid:segment.id,revision:data.revision,segment,boundaries:data.boundaries};
   $('#split-word').innerHTML=data.boundaries.map((b,i)=>`<option value="${i}">${escape(b.label)}</option>`).join('');
-  const options='<option value="">Unassigned</option>'+Object.entries(current.speakers).map(([id,name])=>`<option value="${escape(id)}">${escape(name)}</option>`).join('');
+  const options='<option value="">Unassigned</option>'+Object.entries(current.speakers).map(([id,name])=>`<option value="${escape(id)}">${escape(name)}</option>`).join('')+`<option value="__new__">${uiText('+ New speaker','+ Người nói mới')}</option>`;
   $('#split-left').innerHTML=options;$('#split-right').innerHTML=options;
   $('#split-left').value=segment.speaker??'';$('#split-right').value=segment.speaker??'';
   $('#split-listen').disabled=!current.has_audio;

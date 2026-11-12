@@ -7,7 +7,8 @@ let busy=false,state=null;
 function render(){
   if(!state)return;
   const preparing=state.connected&&state.startup_state!=='error'&&(state.startup_state==='warming'||!(state.features||[]).includes('live_asr'));
-  if(preparing)status.textContent=text('Preparing speech and chat models on Kaggle. The first start may take a few minutes.','Kaggle đang tải/nạp model nhận dạng và chat. Lần khởi động đầu có thể mất vài phút.');
+  if(state.link_repairing)status.textContent=text('Reconnecting: the app is creating a new link and the running Kaggle notebook will pick it up by itself (about 1 minute). Nothing to download.','Đang nối lại: app đang tạo link mới, notebook Kaggle đang chạy sẽ tự nhận link mới (khoảng 1 phút). Không cần tải lại gì.');
+  else if(preparing)status.textContent=text('Preparing speech and chat models on Kaggle. The first start may take a few minutes.','Kaggle đang tải/nạp model nhận dạng và chat. Lần khởi động đầu có thể mất vài phút.');
   else if(state.connected&&state.startup_state==='error')status.textContent=text('Model preparation failed. Check the Kaggle output.','Chuẩn bị model thất bại. Kiểm tra output Kaggle.');
   else if(state.connected&&state.assistant_ready)status.textContent=text('Ready: speech and chat models are loaded.','Sẵn sàng: model nhận dạng và chat đã được nạp.');
   else if(state.connected&&state.gpu_count===1)status.textContent=text('One GPU: speech and chat share resources; the first question may load the chat model.','Chỉ có 1 GPU: nhận dạng và chat dùng chung tài nguyên; câu hỏi đầu có thể phải nạp model.');

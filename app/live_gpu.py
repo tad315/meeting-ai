@@ -33,6 +33,8 @@ def validated_turns(result, channel, offset, duration, cutoff):
                 or not 0 <= start <= end <= duration+.1 or not isinstance(text,str) or len(text)>4000):
             raise ValueError('Timestamp/nội dung live GPU không hợp lệ.')
         # A one-second context overlap is not emitted twice.
+        from .hallucination import clean_text
+        text = clean_text(text)
         if end <= cutoff or not text.strip(): continue
         turns.append(dict(id=uuid.uuid4().hex, start=offset+max(start,cutoff), end=offset+end,
             text=text.strip(), speaker=(f"{channel}_{row['speaker']}" if isinstance(row.get('speaker'),str) and row['speaker'].startswith('speaker_') else None) if result.get('speaker_labels') else str(channel), source_channel=channel, provisional=True))

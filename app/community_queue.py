@@ -53,7 +53,29 @@ def worker_status(worker):
         available_for_jobs=connected and startup not in ('warming','error'))
 
 
-def status():return worker_status(current())
+def tunnel_expired():
+    """True when cloudflared reports that its quick tunnel no longer exists
+    (Cloudflare deletes quick tunnels after a long disconnect, e.g. PC sleep).
+    The URL inside the running notebook can then never work again."""
+    try:
+        with (store.DATA/'gpu-bridge/tunnel.log').open('rb') as log:
+            log.seek(0,2);size=log.tell();log.seek(max(0,size-20000))
+            tail=log.read().decode('utf-8','replace')
+    except OSError:
+        return False
+    lost=tail.rfind('Tunnel not found');ok=tail.rfind('Registered tunnel connection')
+    return lost>ok
+
+
+def status():
+    state=worker_status(current())
+    from . import gpu_connection
+    link=gpu_connection.status()
+    # Offline while the app is replacing a dead link: the notebook will find
+    # the new URL by itself, nothing to download.
+    state['link_repairing']=bool(state['configured'] and not state['connected'] and (link['repairing'] or tunnel_expired()))
+    state['link_expired']=state['link_repairing']
+    return state
 
 
 def job_connected(folder):
@@ -67,20 +89,30 @@ def notebook_for():
     return json.loads((store.ROOT/'colab/community_worker.ipynb').read_text(encoding='utf-8'))
 
 
-def create(url):
+WORKER_SESSION_SECONDS = 7*24*3600
+
+
+def fill_notebook(worker_url, token, topic):
+    notebook=notebook_for()
+    for cell in notebook['cells']:
+        if cell.get('cell_type')=='code':
+            source=''.join(cell['source']).replace('WORKER_URL_PLACEHOLDER',repr(worker_url)).replace('WORKER_KEY_PLACEHOLDER',repr(token))
+            source=source.replace('RENDEZVOUS_TOPIC_PLACEHOLDER',repr(topic))
+            source=source.replace('COMMON_TURN_SOURCE_PLACEHOLDER',repr((store.ROOT/'app/speech_turns.py').read_text(encoding='utf-8')))
+            source=source.replace('HALLUCINATION_SOURCE_PLACEHOLDER',repr((store.ROOT/'app/hallucination.py').read_text(encoding='utf-8')))
+            cell['source']=source.splitlines(keepends=True)
+    return notebook
+
+
+def create(url, topic=''):
     old=current()
     if old:(old[1]/'closed').touch()
     sid,token=uuid.uuid4().hex,secrets.token_urlsafe(32)
     folder=root()/sid;folder.mkdir(parents=True)
-    config=dict(kind='worker',provider='kaggle',expires=time.time()+8*3600,
+    config=dict(kind='worker',provider='kaggle',expires=time.time()+WORKER_SESSION_SECONDS,
                 token_hash=hashlib.sha256(token.encode()).hexdigest())
     (folder/'session.json').write_text(json.dumps(config))
-    notebook=notebook_for()
-    for cell in notebook['cells']:
-        if cell['cell_type']=='code':
-            source=''.join(cell['source']).replace('WORKER_URL_PLACEHOLDER',repr(url+'/worker/'+sid)).replace('WORKER_KEY_PLACEHOLDER',repr(token))
-            source=source.replace('COMMON_TURN_SOURCE_PLACEHOLDER',repr((store.ROOT/'app/speech_turns.py').read_text(encoding='utf-8')))
-            cell['source']=source.splitlines(keepends=True)
+    notebook=fill_notebook(url+'/gpu/worker/'+sid,token,topic)
     (folder/'worker.ipynb').write_text(json.dumps(notebook),encoding='utf-8')
     (root()/'current-worker').write_text(sid)
     (root()/'worker-kaggle').write_text(sid)
@@ -104,8 +136,8 @@ def enqueue(item):
     return folder
 
 
-def refresh_notebook(worker):
-    """Refresh worker code without rotating its private URL/key or disconnecting it."""
+def refresh_notebook(worker, url=None, topic=''):
+    """Refresh worker code (and the current public URL) without rotating its key."""
     import ast
     sid, folder, config = worker
     existing = json.loads((folder/'worker.ipynb').read_text(encoding='utf-8'))
@@ -115,18 +147,18 @@ def refresh_notebook(worker):
         for node in ast.parse(''.join(cell['source'])).body:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id in ('WORKER_URL','WORKER_KEY'):
+                    if isinstance(target, ast.Name) and target.id in ('WORKER_URL','WORKER_KEY','RENDEZVOUS_TOPIC'):
                         credentials[target.id]=ast.literal_eval(node.value)
-    url, token = credentials.get('WORKER_URL'), credentials.get('WORKER_KEY')
-    if (not isinstance(url,str) or not url.endswith('/worker/'+sid) or not isinstance(token,str)
+    old_url, token = credentials.get('WORKER_URL'), credentials.get('WORKER_KEY')
+    if (not isinstance(old_url,str) or not old_url.endswith('/worker/'+sid) or not isinstance(token,str)
             or not secrets.compare_digest(hashlib.sha256(token.encode()).hexdigest(),config['token_hash'])):
         raise ValueError('Không thể cập nhật notebook phiên này; hãy kết nối lại trong Setup.')
-    notebook=notebook_for()
-    for cell in notebook['cells']:
-        if cell.get('cell_type')=='code':
-            source=''.join(cell['source']).replace('WORKER_URL_PLACEHOLDER',repr(url)).replace('WORKER_KEY_PLACEHOLDER',repr(token))
-            source=source.replace('COMMON_TURN_SOURCE_PLACEHOLDER',repr((store.ROOT/'app/speech_turns.py').read_text(encoding='utf-8')))
-            cell['source']=source.splitlines(keepends=True)
+    worker_url=old_url
+    if url:
+        worker_url=url+'/gpu/worker/'+sid
+    elif '/gpu/worker/' not in worker_url:
+        worker_url=worker_url.replace('/worker/'+sid,'/gpu/worker/'+sid)  # pre-8009 session
+    notebook=fill_notebook(worker_url,token,topic or credentials.get('RENDEZVOUS_TOPIC') or '')
     temp=folder/'worker-refresh.part'
     temp.write_text(json.dumps(notebook),encoding='utf-8')
     temp.replace(folder/'worker.ipynb')
@@ -145,3 +177,5 @@ def publish_pending(worker, job_id):
             if config.get('worker_id')==worker[0] and config.get('expires',0)>time.time():
                 (pending/path.parent.name).touch()
     (pending/job_id).touch()
+    from . import job_events
+    job_events.notify()

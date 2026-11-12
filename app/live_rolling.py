@@ -35,9 +35,30 @@ def endpoint(samples, rate=RATE):
     return None
 
 
+def _norm(text):
+    import re
+    return re.sub(r'[^\w]+',' ',text.lower()).strip()
+
+
+def stable_prefix(previous, current):
+    """How many leading complete sentences two consecutive decodes agree on
+    (LocalAgreement-2): text that survived re-decoding with more audio."""
+    count=0
+    for a,b in zip(previous,current):
+        if _norm(a)!=_norm(b) or not _norm(b):break
+        count+=1
+    return count
+
+
 def snapshot_turn(result, channel, start, duration, identity):
     # Do not request per-window speaker clustering on the fast caption path.
     result=dict(result, speaker_labels=False)
+    # Drop Whisper's invented YouTube outros ("Hãy subscribe cho kênh …")
+    # before they are shown, saved, translated or summarized.
+    from .hallucination import clean_text
+    if isinstance(result.get('segments'),list):
+        result['segments']=[dict(r,text=clean_text(r['text'])) if isinstance(r,dict) and isinstance(r.get('text'),str) else r
+                            for r in result['segments']]
     rows=validated_turns(result,channel,start,duration,0)
     if not rows: return None
     return dict(id=identity,start=rows[0]['start'],end=rows[-1]['end'],
@@ -78,6 +99,10 @@ async def capture(ws,config):
     identities=[uuid.uuid4().hex,uuid.uuid4().hex]
     pending=[None,None]
     wake=asyncio.Event()
+    timing_rows=[]  # where the time of recent caption updates went
+    agreed=[[],[]]  # complete sentences of the previous decode, per source
+    early=[[],[]]   # sentences of the current audio window already committed early
+    visible=[set(),set()]  # draft caption ids currently shown in the browser, per source
     stopping=False
     normal=False
     errors=[]
@@ -86,6 +111,21 @@ async def capture(ws,config):
 
     async def send(message):
         if message.get('type')=='update':
+            # Track drafts on screen; whenever text is committed, retire EVERY
+            # older draft of that source (not just the newest), so a superseded
+            # draft can never linger next to its committed sentence.
+            for rid in message.get('remove_turns',[]):
+                for ids in visible:ids.discard(rid)
+            channels={t.get('source_channel') for t in message.get('turns',[]) if t.get('committed')}
+            keep={t['id'] for t in message.get('turns',[]) if not t.get('committed')}
+            for channel in channels:
+                if channel in (0,1):
+                    stale=visible[channel]-keep
+                    if stale:
+                        message=dict(message,remove_turns=list(message.get('remove_turns',[]))+sorted(stale))
+                        visible[channel]-=stale
+            for t in message.get('turns',[]):
+                if not t.get('committed') and t.get('source_channel') in (0,1):visible[t['source_channel']].add(t['id'])
             from . import live_translation
             live_translation.observe(item['id'],message.get('turns',[]),message.get('remove_turns',[]))
         try:await ws.send_json(message)
@@ -100,9 +140,21 @@ async def capture(ws,config):
             values=np.frombuffer(reader.readframes(end-start),dtype='<i2').reshape(-1,2)
             return values[:,channel].copy()
 
+    def unsettled(channel,turn):
+        """Sentences of a window decode that were not committed early.
+        Matched by text first; if Whisper revised a committed sentence, by time."""
+        parts=sentence_turns(turn) if turn.get('words') else [turn]
+        done=early[channel]
+        index=0
+        while index<len(parts) and index<len(done) and _norm(parts[index]['text'])==_norm(done[index]['text']):index+=1
+        if index<len(done):
+            last_end=done[-1]['end'];index=0
+            while index<len(parts) and parts[index]['end']<=last_end+.25:index+=1
+        return parts[index:]
+
     async def settle(channel,end):
         if pending[channel]:
-            sentences=sentence_turns(pending[channel])
+            sentences=unsettled(channel,pending[channel])
             turns.extend(sentences);persist()
             await send(dict(type='update',turns=[dict(t,committed=True) for t in sentences],
                 remove_turns=[pending[channel]['id']],frames=frames,processing_ms=0))
@@ -110,6 +162,74 @@ async def capture(ws,config):
         submitted[channel]=end
         pending[channel]=None
         identities[channel]=uuid.uuid4().hex
+        agreed[channel]=[]
+        early[channel]=[]
+
+    async def advance_window(channel,samples,start):
+        last_end=early[channel][-1]['end']
+        rest=unsettled(channel,pending[channel]) if pending[channel] else []
+        following=next((w['start'] for p in rest for w in (p.get('words') or [])),None)
+        lo,hi=last_end-.05,(following if following and following>last_end else last_end+.15)+.05
+        a,b=max(0,round((lo-start/RATE)*RATE)),min(len(samples),round((hi-start/RATE)*RATE))
+        cut=(last_end+hi-.05)/2
+        width=RATE//50
+        if b-a>=2*width:
+            # Quietest 20 ms inside the gap: robust to word-timestamp jitter.
+            blocks=samples[a:a+(b-a)//width*width].astype(np.float32).reshape(-1,width)
+            quietest=int(np.argmin(np.sqrt(np.mean(blocks*blocks,axis=1))))
+            cut=start/RATE+(a+quietest*width+width//2)/RATE
+        frame=min(max(cursors[channel]+1,round(cut*RATE)),frames)
+        old=identities[channel]
+        cursors[channel]=submitted[channel]=frame
+        pending[channel]=None
+        identities[channel]=uuid.uuid4().hex
+        agreed[channel]=[];early[channel]=[]
+        await send(dict(type='update',turns=[],remove_turns=[old],frames=frames,processing_ms=0))
+
+    async def commit_stable(channel,turn):
+        """Commit finished sentences during continuous speech instead of waiting
+        for a pause or the 12 s window; they appear (and go to translation)
+        about one decode after they are spoken. Only sentences two consecutive
+        decodes agree on are committed. The audio window is NOT cut here
+        (word timestamps jitter; a cut could drop a word): later decodes of the
+        same window simply skip the sentences already committed."""
+        rest=unsettled(channel,turn)
+        complete=[p for p in rest[:-1] if p.get('text','').strip()]
+        keep=stable_prefix(agreed[channel],[p['text'] for p in complete])
+        agreed[channel]=[p['text'] for p in complete]
+        if not keep:return
+        committed=[dict(p,id=uuid.uuid4().hex) for p in complete[:keep]]
+        for part in committed:part.pop('caption_parent',None)
+        early[channel].extend(committed)
+        agreed[channel]=agreed[channel][keep:]
+        turns.extend(committed);persist()
+        remainder=rest[keep:]
+        draft=None
+        if remainder:
+            draft=dict(turn,id=identities[channel],start=remainder[0]['start'],end=remainder[-1]['end'],
+                text=' '.join(p['text'] for p in remainder),words=[w for p in remainder for w in (p.get('words') or [])])
+        await send(dict(type='update',turns=[dict(t,committed=True) for t in committed]+
+            ([dict(draft,committed=False)] if draft else []),
+            remove_turns=[] if draft else [identities[channel]],frames=frames,processing_ms=0))
+
+    def record_timing(job, result, began):
+        """Split one caption update into queue / worker round trip / GPU /
+        network so a live session shows where its latency comes from."""
+        marks=remote_tasks.timing(job);now=time.time()
+        inference=result.get('inference_seconds') if isinstance(result.get('inference_seconds'),(int,float)) else None
+        row=dict(total=now-began)
+        if marks['dispatched']:row['queue']=max(0,marks['dispatched']-began)
+        if marks['dispatched'] and marks['received']:
+            row['worker_round_trip']=max(0,marks['received']-marks['dispatched'])
+            if inference is not None:row['network_and_overhead']=max(0,row['worker_round_trip']-inference)
+        if marks['received']:row['server_pickup']=max(0,now-marks['received'])
+        if inference is not None:row['inference']=inference
+        timing_rows.append(row);del timing_rows[:-120]
+        summary={key:round(float(np.median([r[key] for r in timing_rows if key in r])),3)
+                 for key in ('total','queue','worker_round_trip','inference','network_and_overhead','server_pickup')
+                 if any(key in r for r in timing_rows)}
+        summary['updates']=len(timing_rows)
+        return row,summary
 
     async def consume():
         while True:
@@ -129,6 +249,13 @@ async def capture(ws,config):
                     await settle(channel,end)
                     continue
                 boundary=endpoint(samples)
+                if boundary is None and not stopping and end-start>=12*RATE and early[channel]:
+                    # 12 s of continuous speech: move the window to the boundary
+                    # after the last early-committed sentence instead of cutting
+                    # blindly at 12 s (which can split a word). The rest of the
+                    # speech is decoded again in the next window.
+                    await advance_window(channel,samples,start)
+                    wake.set();continue
                 final=boundary is not None or end-start>=12*RATE or stopping
                 if boundary is not None:
                     end=start+boundary;samples=samples[:boundary]
@@ -137,7 +264,7 @@ async def capture(ws,config):
                     if final:await settle(channel,end)
                     continue
                 did_work=True
-                began=time.monotonic()
+                began=time.time()
                 try:
                     # No 'session': existing workers skip slow Community-1 clustering.
                     job=await asyncio.to_thread(remote_tasks.enqueue,
@@ -146,18 +273,26 @@ async def capture(ws,config):
                     turn=snapshot_turn(result,channel,start/RATE,len(samples)/RATE,identities[channel])
                     pending[channel]=turn
                     submitted[channel]=end
-                    remote=time.monotonic()-began
+                    row,breakdown=record_timing(job,result,began)
+                    remote=row['total']
                     model=result.get('asr_model')
                     if model not in ('small','turbo','large-v3'):model=None
                     lag=max(0,frames/RATE-turn['end']) if turn else 0
                     store.patch(item['id'],live_asr_model=model,live_remote_seconds=round(remote,2),
-                        live_latency_seconds=round(lag,2),live_queue_depth=0,live_asr_quality=result.get('quality',[]),live_inference_seconds=result.get('inference_seconds'))
-                    await send(dict(type='update',turns=[dict(turn,committed=False)] if turn else [],
-                        remove_turns=[] if turn else [identities[channel]],frames=frames,
+                        live_latency_seconds=round(lag,2),live_queue_depth=0,live_asr_quality=result.get('quality',[]),live_inference_seconds=result.get('inference_seconds'),live_timing_breakdown=breakdown)
+                    shown=None
+                    if turn:
+                        rest=unsettled(channel,turn)
+                        if rest:
+                            shown=dict(turn,start=rest[0]['start'],end=rest[-1]['end'],text=' '.join(p['text'] for p in rest),
+                                words=[w for p in rest for w in (p.get('words') or [])])
+                    await send(dict(type='update',turns=[dict(shown,committed=False)] if shown else [],
+                        remove_turns=[] if shown else [identities[channel]],frames=frames,
                         processing_ms=round(remote*1000),timing=dict(asr_model=model,
                             remote_seconds=round(remote,2),queue_depth=0,queue_wait_seconds=0,
-                            audio_lag_seconds=round(lag,2),caption_mode='revisable')))
+                            audio_lag_seconds=round(lag,2),caption_mode='revisable',breakdown=breakdown)))
                     if final:await settle(channel,end)
+                    elif turn:await commit_stable(channel,turn)
                 except Exception as exc:
                     errors.append(str(exc) if isinstance(exc,ValueError) else 'Lỗi nhận diện GPU.')
                     await send(dict(type='notice',message='Chưa nhận được chữ từ GPU. Audio vẫn đang được lưu.'))

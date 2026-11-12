@@ -45,9 +45,10 @@ class WorkerStartupPreloadTests(unittest.TestCase):
         scope,calls=self.scope()
         self.assertEqual(scope['heartbeat_payload']()['features'],[])
         with contextlib.redirect_stdout(io.StringIO()):scope['prepare_worker']()
-        self.assertEqual([c[0] for c in calls],['asr','llm','translation','published'])
-        self.assertEqual(calls[0][1],'vi')
-        self.assertEqual(calls[1][1]['max_tokens'],4)
+        # Both live ASR languages are warmed so the first caption never waits for a model load.
+        self.assertEqual([c[0] for c in calls],['asr','asr','llm','translation','published'])
+        self.assertEqual([calls[0][1],calls[1][1]],['vi','en'])
+        self.assertEqual(calls[2][1]['max_tokens'],4)
         state=scope['heartbeat_payload']()
         self.assertEqual(state['startup_state'],'ready')
         self.assertEqual(state['assistant_state'],'ready')

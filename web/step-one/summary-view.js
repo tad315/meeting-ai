@@ -9,11 +9,29 @@ export function renderSummary(summary, renderSources) {
   const addPoint = (parent, point) => {
     const paragraph = document.createElement('p');
     paragraph.textContent = point.text;
-    if (point.category === 'action' && ('owner' in point || 'deadline' in point)) {
-      paragraph.textContent += ` · Phụ trách: ${point.owner || 'Chưa nêu'} · Hạn chót: ${point.deadline || 'Chưa nêu'}`;
+    if (point.category === 'action') {
+      if (point.owner) paragraph.textContent += ` · Phụ trách: ${point.owner}`;
+      if (point.deadline) paragraph.textContent += ` · Hạn: ${point.deadline}`;
     }
     parent.append(paragraph, renderSources(point.ids));
   };
+  if (summary.format === 'minutes') {
+    // Fixed minutes layout; an empty section is not shown at all.
+    const minutes = [['decision', 'Quyết định'], ['action', 'Việc cần làm'],
+      ['discussion', summary.kind === 'talk' ? 'Nội dung chính' : 'Vấn đề đã thảo luận'], ['open_question', 'Còn bỏ ngỏ']];
+    if (summary.overview?.length) {
+      addHeading(box, 'h3', 'Tổng quan');
+      for (const point of summary.overview) addPoint(box, point);
+    }
+    const points = (summary.sections || []).flatMap(section => section.bullets || []);
+    for (const [category, label] of minutes) {
+      const rows = points.filter(point => point.category === category);
+      if (!rows.length) continue;
+      addHeading(box, 'h3', label);
+      for (const point of rows) addPoint(box, point);
+    }
+    return box;
+  }
   if (summary.overview?.length) {
     addHeading(box, 'h3', 'Tóm tắt nội dung');
     for (const point of summary.overview) addPoint(box, point);

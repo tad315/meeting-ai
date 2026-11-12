@@ -178,7 +178,7 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/recordings/{item['id']}/cancel").status_code, 409)
 
     def test_speaker_count_is_bounded(self):
-        for count in (0, 13):
+        for count in (0, 21):  # up to 20 speakers (large meetings)
             response = self.client.post('/api/recordings/invalid/transcribe', json={'num_speakers': count})
             self.assertEqual(response.status_code, 422)
 

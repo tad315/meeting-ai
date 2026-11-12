@@ -1,210 +1,202 @@
-"""On-demand tunnel and per-recording notebook generation for interactive Colab."""
+"""Kaggle link: the app itself (one port, default 8009) serves the worker API
+under /gpu, and one cloudflared quick tunnel exposes ONLY that prefix.
+
+Quick-tunnel URLs die when the PC sleeps or the network drops for a while.
+The watchdog then creates a new tunnel and publishes the new URL to a private
+rendezvous topic; the running Kaggle notebook reads it and reconnects by itself,
+so the notebook never needs to be downloaded again for a new link.
+"""
 import hashlib
 import json
 import os
 import re
 import secrets
 import subprocess
-import sys
 import threading
 import time
 import uuid
 import urllib.request
 from . import store
 from .gpu_exchange import make_package
-from .relay_version import relay_code_version
 
-processes = []
+PORT = int(os.environ.get('VOXMEET_PORT', '8009'))
+PREFIX = '/gpu'
+RENDEZVOUS = os.environ.get('VOXMEET_RENDEZVOUS', 'https://ntfy.sh').rstrip('/')
+URL_PATTERN = r'https://[a-z0-9-]+\.trycloudflare\.com'
+CHECK_EVERY = 60          # seconds between public health checks
+REPUBLISH_EVERY = 1800    # keep the rendezvous message fresh (ntfy caches ~12 h)
+
+lock = threading.Lock()
+tunnel = None
 log_stream = None
-# connect() and the watchdog must never start/stop relays at the same time.
-relay_lock = threading.Lock()
+link = dict(url=None, checked=0.0, published=0.0, published_url=None, failures=0)
+
+
+def bridge_folder():
+    folder = store.DATA/'gpu-bridge'
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _persistent(name, make):
+    path = bridge_folder()/name
+    try:
+        value = path.read_text().strip()
+        if value:
+            return value
+    except OSError:
+        pass
+    value = make()
+    path.write_text(value)
+    return value
+
+
+def install_id():
+    """Identifies this VoxMeet installation in /gpu/bridge-health."""
+    return _persistent('install-id', lambda: uuid.uuid4().hex)
+
+
+def rendezvous_topic():
+    """Private, unguessable topic carrying only the current public URL."""
+    return _persistent('rendezvous-topic', lambda: 'voxmeet-' + secrets.token_hex(16))
 
 
 def shutdown():
-    global log_stream
-    for process in processes:
-        if process.poll() is None:
-            process.terminate()
-            try: process.wait(timeout=5)
-            except subprocess.TimeoutExpired: process.kill()
-    processes.clear()
-    if log_stream: log_stream.close(); log_stream = None
+    global tunnel, log_stream
+    if tunnel is not None and tunnel.poll() is None:
+        tunnel.terminate()
+        try: tunnel.wait(timeout=5)
+        except subprocess.TimeoutExpired: tunnel.kill()
+    tunnel = None
+    if log_stream:
+        log_stream.close(); log_stream = None
 
 
-def reusable_link():
-    try:
-        state = json.loads((store.DATA/'gpu-bridge/tunnel-state.json').read_text())
-        url, instance = state['url'], state['instance']
-        if not re.fullmatch(r'https://[a-z0-9-]+\.trycloudflare\.com', url) or not instance:
-            return None
-        for endpoint in ('http://127.0.0.1:8010', url):
-            with urllib.request.urlopen(endpoint + '/bridge-health', timeout=8) as response:
-                health = json.load(response)
-                if health.get('instance') != instance or health.get('code') != relay_code_version():
-                    return None
-        return url
-    except (OSError, ValueError, KeyError):
-        return None
-
-
-def remember_link(url, instance):
-    target = store.DATA/'gpu-bridge/tunnel-state.json'
-    partial = target.with_suffix('.part')
-    partial.write_text(json.dumps(dict(url=url, instance=instance)))
-    partial.replace(target)
-    return url
-
-
-def local_relay_instance():
-    """Reuse only our existing relay, never an unrelated service on port 8010."""
-    try:
-        state = json.loads((store.DATA/'gpu-bridge/tunnel-state.json').read_text())
-        instance = state['instance']
-        if not isinstance(instance, str) or not re.fullmatch('[0-9a-f]{32}', instance):
-            return None
-        with urllib.request.urlopen('http://127.0.0.1:8010/bridge-health', timeout=3) as response:
-            health = json.load(response)
-        if health.get('instance') == instance:
-            if health.get('code') == relay_code_version():
-                return instance
-            # Our relay, but started with older code (it survives app restarts).
-            stop_stale_relay()
-    except (OSError, ValueError, KeyError, AttributeError):
-        pass
-    return None
-
-
-def stop_stale_relay():
-    """Stop only a VoxMeet relay process listening on port 8010 (Windows)."""
+def stop_stale_processes():
+    """Windows: stop cloudflared/relay processes left by earlier app runs
+    (including the retired separate relay on port 8010). Only VoxMeet's own."""
     if os.name != 'nt':
-        return False
-    script = ("Get-NetTCPConnection -LocalPort 8010 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { "
-              "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.OwningProcess)\"; "
-              "if ($p -and $p.CommandLine -like '*app.gpu_bridge:bridge*') { Stop-Process -Id $p.ProcessId -Force } }")
+        return
+    keep = tunnel.pid if tunnel is not None and tunnel.poll() is None else -1
+    script = ("Get-CimInstance Win32_Process | Where-Object { "
+              "($_.Name -eq 'cloudflared.exe' -and $_.CommandLine -like '*--url http://127.0.0.1:80*') -or "
+              "($_.CommandLine -like '*app.gpu_bridge:bridge*') } | "
+              f"Where-Object {{ $_.ProcessId -ne {keep} }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
     try:
         subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], capture_output=True,
                        timeout=30, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        time.sleep(1)
     except (OSError, subprocess.SubprocessError):
-        return False
-    for _ in range(20):
-        try:
-            urllib.request.urlopen('http://127.0.0.1:8010/bridge-health', timeout=1).close()
-        except OSError:
-            return True
-        time.sleep(.5)
-    return False
+        pass
 
 
-def start_relay(instance):
-    """Start the local relay on port 8010 with a known instance id."""
-    folder = store.DATA/'gpu-bridge'
-    folder.mkdir(parents=True, exist_ok=True)
-    flags = getattr(subprocess,'CREATE_NO_WINDOW',0) | getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)
-    env = os.environ.copy()
-    env['VOXMEET_BRIDGE_DATA'] = str(folder)
-    env['VOXMEET_BRIDGE_INSTANCE'] = instance
-    relay_log = (folder/'relay.log').open('ab')
+def public_link_ready(url):
     try:
-        relay = subprocess.Popen([sys.executable,'-m','uvicorn','app.gpu_bridge:bridge',
-                                  '--host','127.0.0.1','--port','8010','--no-access-log'],
-                                 cwd=store.ROOT, env=env, stdout=relay_log,stderr=relay_log,
-                                 creationflags=flags)
-    finally: relay_log.close()
-    processes.append(relay)
-    time.sleep(2)
-    return relay.poll() is None
-
-
-def ensure_relay():
-    if not relay_lock.acquire(blocking=False):
-        return False  # a connect() is in progress
-    try:
-        return _ensure_relay()
-    finally:
-        relay_lock.release()
-
-
-def _ensure_relay():
-    """Keep an existing Kaggle link working: if the relay behind the saved tunnel
-    stopped (or runs old code), start it again with the SAME instance id. The
-    cloudflared tunnel and the worker notebook URL stay valid, so Kaggle
-    reconnects by itself without downloading a new notebook."""
-    try:
-        state = json.loads((store.DATA/'gpu-bridge/tunnel-state.json').read_text())
-        instance = state['instance']
-        if not isinstance(instance, str) or not re.fullmatch('[0-9a-f]{32}', instance):
-            return False
-    except (OSError, ValueError, KeyError):
-        return False
-    try:
-        with urllib.request.urlopen('http://127.0.0.1:8010/bridge-health', timeout=3) as response:
-            health = json.load(response)
-        if health.get('instance') != instance:
-            return False  # some other service owns the port; never touch it
-        if health.get('code') == relay_code_version():
-            return True
-        if not stop_stale_relay():
-            return False
-    except (OSError, ValueError, AttributeError):
-        pass  # relay is down
-    return start_relay(instance)
-
-
-def public_link_ready(url, instance):
-    try:
-        with urllib.request.urlopen(url+'/bridge-health', timeout=3) as response:
-            return json.load(response).get('instance') == instance
+        with urllib.request.urlopen(url + PREFIX + '/bridge-health', timeout=8) as response:
+            return json.load(response).get('instance') == install_id()
     except (OSError, ValueError, AttributeError):
         return False
 
 
-def connect():
-    with relay_lock:
-        return _connect()
+def saved_url():
+    try:
+        url = json.loads((bridge_folder()/'tunnel-state.json').read_text()).get('url')
+        return url if isinstance(url, str) and re.fullmatch(URL_PATTERN, url) else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
-def _connect():
-    global log_stream
-    previous = reusable_link()
-    if previous:
-        return previous
+def remember_link(url):
+    target = bridge_folder()/'tunnel-state.json'
+    partial = target.with_suffix('.part')
+    partial.write_text(json.dumps(dict(url=url, instance=install_id(), port=PORT, created=time.time())))
+    partial.replace(target)
+    link.update(url=url, checked=time.time(), failures=0)
+    return url
+
+
+def publish(url):
+    """Tell a running Kaggle notebook where the app is now. Best effort."""
+    try:
+        body = json.dumps(dict(url=url, at=time.time())).encode()
+        request = urllib.request.Request(f'{RENDEZVOUS}/{rendezvous_topic()}', data=body, method='POST',
+                                         headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(request, timeout=10).close()
+        link.update(published=time.time(), published_url=url)
+        return True
+    except OSError:
+        return False
+
+
+def start_tunnel():
+    global tunnel, log_stream
     executable = store.ROOT/'data/gpu-tools/cloudflared.exe'
     if not executable.is_file():
         raise ValueError('Run setup-gpu-link.ps1 once, then try again.')
-    folder = store.DATA/'gpu-bridge'
-    folder.mkdir(parents=True,exist_ok=True)
-    log = folder/'tunnel.log'
-    # A running cloudflared process is NOT proof that its public URL still exists.
-    # Retire owned stale processes instead of returning the first URL in an old log.
     shutdown()
-    instance = local_relay_instance()
-    flags = getattr(subprocess,'CREATE_NO_WINDOW',0) | getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)
-    if not instance:
-        instance = uuid.uuid4().hex
-        if not start_relay(instance):
-            shutdown()
-            raise ValueError('GPU transfer port 8010 is unavailable. See data/gpu-bridge/relay.log.')
-        # Save the instance before public registration so a later app restart can
-        # recognize this relay even if Cloudflare failed to establish its link.
-        remember_link('https://pending.trycloudflare.com', instance)
+    stop_stale_processes()
+    log = bridge_folder()/'tunnel.log'
     log_stream = log.open('w')
-    tunnel = subprocess.Popen([str(executable),'tunnel','--url','http://127.0.0.1:8010',
-                               '--no-autoupdate'],stdout=log_stream,stderr=log_stream,
-                              creationflags=flags)
-    processes.append(tunnel)
-    for _ in range(40):
-        if any(p.poll() is not None for p in processes): break
-        contents = log.read_text(errors='replace')
-        if 'Unauthorized: Tunnel not found' in contents:
+    flags = getattr(subprocess,'CREATE_NO_WINDOW',0) | getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)
+    tunnel = subprocess.Popen([str(executable), 'tunnel', '--url', f'http://127.0.0.1:{PORT}', '--no-autoupdate'],
+                              stdout=log_stream, stderr=log_stream, creationflags=flags)
+    for _ in range(45):
+        if tunnel.poll() is not None:
             break
-        match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com',contents)
-        if match and 'Registered tunnel connection' in contents:
-            url = match.group(0)
-            if public_link_ready(url, instance):
-                return remember_link(url, instance)
+        contents = log.read_text(errors='replace')
+        match = re.search(URL_PATTERN, contents)
+        if match and 'Registered tunnel connection' in contents and public_link_ready(match.group(0)):
+            url = remember_link(match.group(0))
+            publish(url)
+            return url
         time.sleep(1)
     shutdown()
     raise ValueError('Could not establish a healthy GPU transfer link. Check your network and retry.')
+
+
+def _ensure(force=False):
+    url = link['url'] or saved_url()
+    now = time.time()
+    if url and not force and now - link['checked'] < CHECK_EVERY:
+        return url
+    if url and public_link_ready(url):
+        link.update(url=url, checked=now, failures=0)
+        # Retry until the notebook has been told about THIS url (a publish can
+        # fail on a weak network right after the tunnel was replaced).
+        if link['published_url'] != url or now - link['published'] > REPUBLISH_EVERY:
+            publish(url)
+        return url
+    # One slow health check must not rotate a working link (the notebook would
+    # have to rediscover it); replace after two consecutive failures.
+    link['failures'] += 1
+    if url and link['failures'] < 2 and not force:
+        return url
+    return start_tunnel()
+
+
+def ensure_link():
+    """Watchdog entry point; never blocks behind a connect() in progress."""
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        return _ensure()
+    except ValueError:
+        return None
+    finally:
+        lock.release()
+
+
+def connect():
+    with lock:
+        return _ensure(force=True)
+
+
+def current_url():
+    return link['url'] or saved_url()
+
+
+def status():
+    return dict(url=current_url(), failures=link['failures'], repairing=link['failures'] > 0)
 
 
 def prepare(item, url):
@@ -222,7 +214,7 @@ def prepare(item, url):
         'This notebook downloads only the selected recording and returns the result automatically.\n',
         'Keep the local demo open. Transfer expires after one hour. Audio passes through Cloudflare to Google Colab.\n',
         '**Private notebook: contains a temporary access key. Do not share it.**\n']
-    setup = f'GPU_LINK = {url!r} + "/exchange/{sid}"\nGPU_KEY = {token!r}\n'
+    setup = f'GPU_LINK = {url!r} + "/gpu/exchange/{sid}"\nGPU_KEY = {token!r}\n'
     for cell in notebook['cells']:
         if cell['cell_type'] != 'code': continue
         text = ''.join(cell['source'])

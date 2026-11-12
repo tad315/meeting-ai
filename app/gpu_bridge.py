@@ -11,18 +11,35 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from .gpu_payloads import MAX_GPU_RESULT_BYTES, ERROR_MESSAGES
-from .relay_version import relay_code_version
+from . import job_events
 
 bridge = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+# Mounted inside the main app under /gpu (step_one); the app sets ROOT at startup.
 ROOT = Path(os.environ.get('VOXMEET_BRIDGE_DATA', Path(__file__).resolve().parents[1] / 'data/gpu-bridge'))
-# Fixed when this relay process starts; the app compares it with the code on disk.
-CODE_VERSION = relay_code_version()
 KNOWN_FEATURES = ('multilingual','llm','live_asr','live_speakers','live_refine','shared_turns','flac_audio')
+
+
+def atomic_write(target, text):
+    """Unique temp file + retry: on Windows a concurrent reader or antivirus
+    scan can briefly lock the target and make os.replace fail with WinError 5."""
+    temp = target.with_name(f'{target.name}.{secrets.token_hex(4)}.part')
+    temp.write_text(text)
+    for attempt in range(10):
+        try:
+            temp.replace(target)
+            return
+        except PermissionError:
+            if attempt == 9:
+                temp.unlink(missing_ok=True)
+                raise
+            time.sleep(.05 * (attempt + 1))
 
 
 @bridge.get('/bridge-health')
 async def bridge_health():
-    return {'instance': os.environ.get('VOXMEET_BRIDGE_INSTANCE', ''), 'scheduler': 'fair-live-chat-v1', 'worker_readiness': 'preload-v2.5', 'result_transport': 'long-record-v2.6', 'code': CODE_VERSION}
+    from .gpu_connection import install_id
+    return {'instance': install_id(), 'scheduler': 'fair-live-chat-v1', 'worker_readiness': 'preload-v2.5',
+            'result_transport': 'long-record-v2.6', 'transport': 'single-port-v3'}
 
 
 def authorized(sid, request):
@@ -73,7 +90,7 @@ async def heartbeat(sid: str, request: Request):
         except (ValueError, AttributeError,KeyError): raise HTTPException(400)
         (folder/'features.json').write_text(json.dumps(features))
         if runtime is not None:
-            temp=folder/'runtime.part';temp.write_text(json.dumps(runtime));temp.replace(folder/'runtime.json')
+            atomic_write(folder/'runtime.json', json.dumps(runtime))
         else:
             # An older worker rerun under the same session must not inherit a
             # previous process's ready flag.
@@ -159,7 +176,9 @@ async def next_job(sid: str, request: Request, inline: bool=False, wait: float=0
             return {'job':job}
         if time.monotonic()>=deadline:
             return Response(status_code=204) if inline else {'job':None}
-        await asyncio.sleep(.1)
+        # Woken immediately when the app publishes a job (same process);
+        # the timeout keeps a periodic re-check as a safety net.
+        await job_events.wait(.25)
 
 
 @bridge.post('/exchange/{sid}/failed')
@@ -172,6 +191,7 @@ async def failed(sid: str, request: Request):
     except (ValueError,AttributeError):raise HTTPException(400)
     if code not in ERROR_MESSAGES:raise HTTPException(400)
     (folder/'error.json').write_text(json.dumps({'code':code,'error':ERROR_MESSAGES[code]}))
+    job_events.notify()
     return {'received': True}
 
 
@@ -186,8 +206,7 @@ async def progress(sid: str, request: Request):
         if stage not in ('loading_models','recognizing_speech','identifying_speakers','verifying_speakers','returning_result'):raise ValueError()
         if percent is not None and (type(percent) not in (int,float) or not 0<=percent<=100):raise ValueError()
     except (ValueError,KeyError,TypeError):raise HTTPException(400)
-    temp=folder/'progress.part';temp.write_text(json.dumps(dict(stage=stage,progress=percent,updated_at=time.time())))
-    temp.replace(folder/'progress.json')
+    atomic_write(folder/'progress.json', json.dumps(dict(stage=stage,progress=percent,updated_at=time.time())))
     config=json.loads((folder/'session.json').read_text())
     if config.get('worker_id'):(ROOT/config['worker_id']/'heartbeat').touch()
     return {'received':True}
@@ -221,4 +240,6 @@ async def result(sid: str, request: Request):
     partial = folder/'result.part'
     partial.write_bytes(body)
     partial.replace(path)
+    (folder/'received.json').write_text(json.dumps({'received_at':time.time()}))
+    job_events.notify()
     return {'received':True}

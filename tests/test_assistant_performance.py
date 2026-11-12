@@ -25,6 +25,8 @@ class CacheTests(unittest.TestCase):
    calls.append(1);return json.dumps({'bullets':[{'category':'topic','text':'Delivery is scheduled.','ids':['1']}]})
   with patch('app.demo_features.chat',fake):
    first=asyncio.run(draft_summary(item,'kaggle'));second=asyncio.run(draft_summary(item,'kaggle'))
+   self.assertEqual(second['timing']['cached_calls'],1);self.assertEqual(first['timing']['cached_calls'],0)
+   first.pop('timing');second.pop('timing')
    self.assertEqual(first,second);self.assertEqual(len(calls),1)
    item['segments'][0]['text']='The delivery was cancelled.'
    asyncio.run(draft_summary(item,'kaggle'));self.assertEqual(len(calls),2)

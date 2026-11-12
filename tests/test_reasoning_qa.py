@@ -140,3 +140,37 @@ class ConclusionSufficiencyTests(unittest.TestCase):
         self.assertEqual(len(calls),1)
 
 if __name__=='__main__':unittest.main()
+
+
+class AnswerLanguageTests(unittest.TestCase):
+    def test_vietnamese_question_with_english_terms_stays_vietnamese(self):
+        from app.meeting_qa import answer_language
+        for q in ['Cuộc họp quyết định gì về budget?', 'Ai phụ trách KPI marketing?', 'deadline project K2 khi nao',
+                  'Hoàng nói gì về deadline?', 'cuoc hop quyet dinh gi']:
+            self.assertEqual(answer_language(q, {'language': 'vi'}), 'vi', q)
+        for q in ['What was decided?', 'Can we conclude that Hoàng is lazy?', 'What does Hoàng say about the deadline?']:
+            self.assertEqual(answer_language(q, {'language': 'vi'}), 'en', q)
+
+    def test_english_reply_to_vietnamese_question_is_retried_in_vietnamese(self):
+        calls = []
+        async def fake(messages, *a, **kw):
+            calls.append(messages[0]['content'])
+            if len(calls) == 1:
+                return response('The meeting decided to change the bonus policy so that rewards follow productivity and results.', ['1'])
+            return response('Cuộc họp quyết định đổi chính sách thưởng theo năng suất và kết quả công việc.', ['1'])
+        with patch('app.meeting_qa.chat', fake):
+            result = asyncio.run(answer(fixture(), 'Cuộc họp quyết định gì về bonus?', 'kaggle'))
+        self.assertTrue(result['points'][0]['text'].startswith('Cuộc họp'))
+        self.assertIn('not written in Vietnamese', calls[-1])
+
+
+class SpeakerRoleTests(unittest.TestCase):
+    def test_roles_come_from_how_people_are_addressed(self):
+        from app.meeting_qa import speaker_roles
+        rows = [('A', 'Tiếp đây, giám đốc sẽ phổ biến cụ thể với mọi người.'), ('B', 'Cảm ơn mọi người.'),
+                ('B', 'Trưởng phòng hãy cho tôi biết cái lý do.'), ('C', 'Dạ thưa giám đốc, đối thủ rất mạnh.'),
+                ('B', 'Thư ký em hãy đọc cho các bạn nghe.'), ('A', 'Vâng thưa mọi người.'),
+                ('B', 'Trưởng phòng chị thấy chính sách này có thỏa đáng không?'), ('C', 'Chính sách này tạo động lực.'),
+                ('D', 'Thưa giám đốc, em có ý kiến.')]
+        segments = [dict(id=str(i), speaker=v, text=t) for i, (v, t) in enumerate(rows)]
+        self.assertEqual(speaker_roles(segments), {'B': 'giám đốc', 'C': 'trưởng phòng'} | {'A': 'thư ký'})

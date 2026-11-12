@@ -103,7 +103,10 @@ $('#start').onclick=async()=>{
         $('#state').textContent='Đang ghi âm · transcript là bản nháp';$('#stop').disabled=false;
       }
       if(message.type==='update'){
-        ack=message.frames;if(message.speakers){if(!meeting)meeting={};meeting.speakers={...(meeting.speakers||{}),...message.speakers};}(message.remove_turns||[]).forEach(id=>render({id,deleted:true}));message.turns.forEach(render);
+        ack=message.frames;if(message.speakers){if(!meeting)meeting={};meeting.speakers={...(meeting.speakers||{}),...message.speakers};}(message.remove_turns||[]).forEach(id=>render({id,deleted:true}));
+        // A committed sentence supersedes any draft of the same source that overlaps it.
+        for(const c of message.turns.filter(t=>t.committed))for(const t of [...turns.values()])if(!t.committed&&t.id!==c.id&&t.source_channel===c.source_channel&&t.start<c.end-.05&&c.start<t.end-.05)render({id:t.id,deleted:true});
+        message.turns.forEach(render);
         if(message.timing)gpuTiming=message.timing;
         const parts=[uiText('Received ','Đã nhận ')+(ack/16000).toFixed(1)+'s'];
         if(gpuTiming){
