@@ -207,11 +207,21 @@ function summaryView(summary){
   box.prepend(paragraph(uiText('Based on transcript through ','Dựa trên transcript đến ')+clock(summary.through_seconds)));
   return box;
 }
+let meetingVersion=null;
+function renderAssistantTimers(data){
+  $('#summary-state').textContent=data.summary_status==='processing'?uiText('Summarizing through ','Đang tóm tắt đến ')+clock(data.summary_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.summary_started_at||Date.now()/1000)))+'s':data.summary_error||'';
+  $('#question-state').textContent=data.qa_status==='processing'?uiText('Answering through ','Đang trả lời đến ')+clock(data.qa_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.qa_started_at||Date.now()/1000)))+'s: '+(data.qa_pending||''):data.qa_error||'';
+}
 async function refreshMeeting(){
   if(!savedId||polling)return;polling=true;const requested=savedId;
   try{
-    const r=await fetch('/api/recordings/'+requested);if(!r.ok)throw Error('Could not restore this meeting. Saved recordings were not deleted.');
-    const data=await r.json();if(savedId!==requested)return;meeting=data;$('#delete-live').hidden=false;$('#delete-live').disabled=active||data.qa_status==='processing'||data.summary_status==='processing';$('#session-name').textContent=data.title;
+    // Conditional request: unchanged meeting -> 304, no download, no re-render.
+    const known=meetingVersion?.id===requested&&meeting?.id===requested?meetingVersion.etag:null;
+    const r=await fetch('/api/recordings/'+requested,{cache:'no-store',headers:known?{'If-None-Match':known}:{}});
+    if(r.status===304&&meeting?.id===requested){renderAssistantTimers(meeting);return;}
+    if(!r.ok)throw Error('Could not restore this meeting. Saved recordings were not deleted.');
+    const data=await r.json();if(savedId!==requested)return;meeting=data;
+    const etag=r.headers.get('ETag');meetingVersion=etag?{id:requested,etag}:null;$('#delete-live').hidden=false;$('#delete-live').disabled=active||data.qa_status==='processing'||data.summary_status==='processing';$('#session-name').textContent=data.title;
     const translationState=data.live_translation;
     liveTranslations=new Map((translationState&&translationState.source_language+'-'+translationState.target_language===$('#live-translation-mode').value?translationState.segments||[]:[]).map(row=>[row.id,row]));
     if(translationState?.enabled&&translationState.source_language+'-'+translationState.target_language===$('#live-translation-mode').value){
@@ -231,8 +241,7 @@ async function refreshMeeting(){
     $('#assistant-coverage').textContent=uiText('Settled transcript through','Transcript đã chốt đến')+' '+clock(end);
     const busy=submittingQuestion||data.qa_status==='processing'||data.summary_status==='processing';
     $('#live-ask').disabled=$('#live-summarize').disabled=!data.segments?.length||busy;
-    $('#summary-state').textContent=data.summary_status==='processing'?uiText('Summarizing through ','Đang tóm tắt đến ')+clock(data.summary_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.summary_started_at||Date.now()/1000)))+'s':data.summary_error||'';
-    $('#question-state').textContent=data.qa_status==='processing'?uiText('Answering through ','Đang trả lời đến ')+clock(data.qa_pending_through)+' · '+Math.max(0,Math.floor(Date.now()/1000-(data.qa_started_at||Date.now()/1000)))+'s: '+(data.qa_pending||''):data.qa_error||'';
+    renderAssistantTimers(data);
     const key=JSON.stringify([data.qa,data.summary,data.summary_history,data.qa_pending,data.qa_status,data.qa_error]);
     if(key!==assistantKey && !submittingQuestion){assistantKey=key;$('#live-chat').replaceChildren();
       for(const q of data.qa||[]){const block=document.createElement('article');block.append(paragraph(uiText('You: ','Bạn: ')+q.question));
@@ -288,7 +297,11 @@ setInterval(()=>{
   const state=meeting?.live_translation;
   const translating=state?.enabled&&!['ready','error','off'].includes(state.status);
   const now=Date.now();
-  if(savedId&&now-lastMeetingPoll>=(translating?250:1000)){
+  // Fast while something is changing; slow when the meeting is idle.
+  const busy=active||submittingQuestion||meeting?.qa_status==='processing'||meeting?.summary_status==='processing'||meeting?.translation_status==='processing'||['recording','queued','decoding','transcribing','cancelling'].includes(meeting?.status);
+  const interval=translating?250:busy?1000:5000;
+  if(document.hidden&&!active)return;
+  if(savedId&&now-lastMeetingPoll>=interval){
     lastMeetingPoll=now;refreshMeeting();
   }
 },250);

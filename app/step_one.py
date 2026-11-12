@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
+import hashlib
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -141,14 +142,50 @@ async def health():
                    'deepgram_configured', 'ffmpeg_available', 'local_model')})
 
 
+def etag_for(*parts):
+    digest = hashlib.sha1()
+    for part in parts:
+        digest.update(part if isinstance(part, bytes) else str(part).encode('utf-8'))
+        digest.update(b'\0')
+    return '"' + digest.hexdigest()[:24] + '"'
+
+
+def not_modified(request, etag):
+    return request.headers.get('if-none-match') == etag
+
+
+def json_with_etag(request, data, etag=None):
+    """Polling support: an unchanged resource costs a 304 with no body."""
+    headers = {'Cache-Control': 'no-cache'}
+    body = None
+    if etag is None:
+        body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        etag = etag_for(body)
+    headers['ETag'] = etag
+    if not_modified(request, etag):
+        return Response(status_code=304, headers=headers)
+    if body is None:
+        body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return Response(body, media_type='application/json', headers=headers)
+
+
 @app.get('/api/recordings')
-async def recordings():
-    return [public(item) for item in store.listing() if item.get('source') == 'upload']
+async def recordings(request: Request):
+    return json_with_etag(request, [public(item) for item in store.listing() if item.get('source') == 'upload'])
 
 
 @app.get('/api/recordings/{mid}')
-async def recording(mid: str):
-    return public(get(mid))
+async def recording(mid: str, request: Request):
+    raw = store.get_raw(mid)
+    if raw is None:
+        raise HTTPException(404, 'Recording not found.')
+    # Version = stored payload + in-memory live translation drafts. Checked
+    # before parsing, so an unchanged poll does almost no work.
+    previews = live_translation.previews(mid)
+    etag = etag_for(raw, json.dumps(previews, ensure_ascii=False, sort_keys=True))
+    if not_modified(request, etag):
+        return Response(status_code=304, headers={'ETag': etag, 'Cache-Control': 'no-cache'})
+    return json_with_etag(request, public(json.loads(raw)), etag)
 
 
 def require_idle(item):

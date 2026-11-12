@@ -9,9 +9,20 @@ const labels = {recording:'Recording live',queued:'Waiting',decoding:'Preparing 
 const stages={waiting_gpu_connection:uiText('Waiting for the GPU connection; the job is preserved…','Đang chờ GPU kết nối lại; tác vụ vẫn được giữ…'),verifying_speakers:uiText('Reviewing speaker labels…','Đang kiểm tra nhãn người nói…'),returning_result:uiText('Returning transcript…','Đang nhận transcript…'),community_worker:'Community-1 worker is processing your recording…',loading_models:'Loading local speech models…',recognizing_speech:'Recognizing English speech',identifying_speakers:'Identifying speakers',aligning_words:'Matching words to speaker turns…',saving:'Saving your transcript…',requesting_api:'Waiting for the speech API…'};
 const colours=['#e8eed9','#dfecef','#efe5da','#eae2ef','#f1edcf'];
 let recordings=[], current=null, caps=null, uploading=false, polling=false;
+// GET responses carry an ETag. Polls send it back; an unchanged recording
+// answers 304 with no body and the SAME object is returned, so callers can
+// skip re-rendering with a simple identity check.
+const versions=new Map();
+const pageHidden=()=>document.hidden||(window.frameElement!=null&&window.frameElement.offsetParent===null);
 async function api(path, options={}){
-  const response=await fetch('/api'+path,options);const data=await response.json();
+  const read=!options.method||options.method==='GET';
+  const known=read?versions.get(path):null;
+  const response=await fetch('/api'+path,read?{...options,cache:'no-store',headers:{...(options.headers||{}),...(known?{'If-None-Match':known.etag}:{})}}:options);
+  if(read&&response.status===304&&known)return known.data;
+  const data=await response.json();
   if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'The request could not be completed.');
+  const etag=read&&response.headers.get('ETag');
+  if(etag)versions.set(path,{etag,data});
   return data;
 }
 function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').hidden=true,8000);}
@@ -20,7 +31,7 @@ function renderList(){
   const term=$('#search').value.toLowerCase(), rows=recordings.filter(r=>r.title.toLowerCase().includes(term));
   $('#recordings').innerHTML=rows.map(r=>`<div class="recording-row"><button class="recording" data-id="${escape(r.id)}"><span class="recording-icon" aria-hidden="true">≋</span><div><strong>${escape(r.title)}</strong><small>${escape(new Date(r.created_at).toLocaleDateString(localStorage.getItem('voxmeet-ui-language')==='en'?'en':'vi',{month:'short',day:'numeric'}))} · ${clock(r.duration)} · ${escape(r.language||'en')}</small></div><span class="tag ${escape(r.status)}">${escape(window.voxmeetT?.(labels[r.status]||r.status)||labels[r.status]||r.status)}</span><span aria-hidden="true">↗</span></button><button type="button" class="icon-action danger" data-delete="${escape(r.id)}" title="${uiText('Delete','Xóa')}" aria-label="${uiText('Delete recording','Xóa bản ghi')}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>`).join('')||`<div class="empty"><span aria-hidden="true">≋</span><h3>${term?'No matching recordings.':'Your first conversation starts here.'}</h3><p>${term?'Try a different title.':'Upload an English audio file to get started.'}</p></div>`;
 }
-async function refreshList(){recordings=await api('/recordings');renderList();}
+async function refreshList(){const list=await api('/recordings');if(list===recordings)return;recordings=list;renderList();}
 function refreshMode(){
   const provider=$('#provider').value;
   const ready=caps&&(provider==='community'?caps.community_worker?.available_for_jobs:provider==='local'?caps.local_ready:caps.deepgram_configured);
@@ -107,9 +118,9 @@ document.addEventListener('click',async event=>{
 });
 $('#audio').ontimeupdate=()=>{const time=$('#audio').currentTime;document.querySelectorAll('.turn').forEach(el=>el.classList.toggle('playing',time>=Number(el.dataset.start)&&time<Number(el.dataset.end)));};
 setInterval(async()=>{
-  if(polling||uploading)return;polling=true;
+  if(polling||uploading||pageHidden())return;polling=true;
   try{
-    if(current&&active(current.status)){const id=current.id,updated=await api('/recordings/'+id);if(current?.id===id){current=updated;renderDetail();}}
+    if(current&&active(current.status)){const id=current.id,updated=await api('/recordings/'+id);if(current?.id===id&&updated!==current){current=updated;renderDetail();}}
     else if(!current)await refreshList();
   }catch(error){toast('The server is unavailable. Start run.ps1 to reconnect.');}finally{polling=false;}
 },2500);
@@ -211,7 +222,7 @@ $('#edit-form').onsubmit=async event=>{
 setInterval(async()=>{
   if(!current||current.summary_status!=='processing'||polling)return;
   polling=true;const id=current.id;
-  try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderSummary();}}
+  try{const item=await api('/recordings/'+id);if(current?.id===id&&item!==current){current=item;renderSummary();}}
   catch(e){toast(e.message);}finally{polling=false;}
 },2500);
 
@@ -309,7 +320,7 @@ $('#qa-form').onsubmit=async event=>{
 setInterval(async()=>{
   if(!current||current.qa_status!=='processing'||polling)return;
   polling=true;const id=current.id;
-  try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderQA();}}
+  try{const item=await api('/recordings/'+id);if(current?.id===id&&item!==current){current=item;renderQA();}}
   catch(e){toast(e.message);}finally{polling=false;}
 },2500);
 
@@ -417,7 +428,7 @@ let pollingTranslation=false;
 setInterval(async()=>{
   if(!current||current.translation_status!=='processing'||pollingTranslation)return;
   pollingTranslation=true;const id=current.id;
-  try{const item=await api('/recordings/'+id);if(current?.id===id){current=item;renderTranslation();}}
+  try{const item=await api('/recordings/'+id);if(current?.id===id&&item!==current){current=item;renderTranslation();}}
   catch(error){toast(error.message);}finally{pollingTranslation=false;}
 },2000);
 

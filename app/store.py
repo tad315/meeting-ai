@@ -76,10 +76,26 @@ def patch(mid, **changes):
     return item
 
 
-def listing():
+def get_raw(mid):
+    """Stored JSON text, without parsing: lets unchanged polls skip all work."""
     with connect() as db:
-        rows = db.execute('SELECT payload FROM meetings ORDER BY rowid DESC').fetchall()
-    return [{k: v for k, v in json.loads(row[0]).items() if k not in ('segments', 'messages', 'summary', 'translation')} for row in rows]
+        row = db.execute('SELECT payload FROM meetings WHERE id=?', (mid,)).fetchone()
+    return row[0] if row else None
+
+
+LIST_EXCLUDED = ('segments', 'messages', 'summary', 'translation')
+
+
+def listing():
+    # Drop the large transcript fields inside SQLite (C code) instead of parsing
+    # every full transcript in Python just to list titles and statuses.
+    paths = ', '.join("'$.%s'" % key for key in LIST_EXCLUDED)
+    with connect() as db:
+        try:
+            rows = db.execute(f'SELECT json_remove(payload, {paths}) FROM meetings ORDER BY rowid DESC').fetchall()
+        except sqlite3.OperationalError:  # SQLite without JSON functions
+            rows = db.execute('SELECT payload FROM meetings ORDER BY rowid DESC').fetchall()
+    return [{k: v for k, v in json.loads(row[0]).items() if k not in LIST_EXCLUDED} for row in rows]
 
 
 def replace_segments(item, segments, final=False):

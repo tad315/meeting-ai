@@ -38,4 +38,5 @@ document.querySelector('#setup-dialog').addEventListener('toggle',()=>{if(docume
 window.addEventListener('voxmeet-refresh-worker',refresh);
 window.addEventListener('voxmeet-language-change',render);
 document.querySelector('#refresh-setup').addEventListener('click',refresh);
-setInterval(refresh,5000);refresh();
+// Skip background checks while this page/tab is not visible.
+setInterval(()=>{if(document.hidden||(window.frameElement!=null&&window.frameElement.offsetParent===null))return;refresh();},5000);refresh();
